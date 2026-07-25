@@ -259,6 +259,11 @@ function AuthenticatedApp({
     <div className="flex flex-col gap-4 p-3 h-full">
       <SearchBox value={searchHook.query} onChange={searchHook.search} />
       {searchHook.loading && <p className="text-xs text-gray-500 px-1">Searching…</p>}
+      {searchHook.fallbackReason && (
+        <p className="text-xs text-amber-300 bg-amber-950/40 border border-amber-900 rounded px-2 py-1">
+          Semantic search {searchHook.fallbackReason === 'embedding_timeout' ? 'timed out' : 'failed'}; showing keyword matches.
+        </p>
+      )}
       <SearchResults results={searchHook.results} onSelect={handleSearchSelect} />
 
       <div className="border-t border-gray-800 pt-3">

@@ -641,7 +641,7 @@ describe('search-service', () => {
     expect(results.some((r) => r.entityId === entityId)).toBe(true);
   }, 120_000);
 
-  it('returns EMBEDDING_FAILED when query embedding fails', async () => {
+  it('returns lexical fallback results when query embedding fails', async () => {
     if (!database) {
       throw new Error('test database not initialized');
     }
@@ -672,7 +672,15 @@ describe('search-service', () => {
       { embeddingService: failingEmbeddingService }
     );
 
-    expect(result.isErr()).toBe(true);
-    expect(result._unsafeUnwrapErr().code).toBe('EMBEDDING_FAILED');
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap()).toMatchObject({
+      searchMode: 'lexical_fallback',
+      fallbackReason: 'embedding_error'
+    });
+    expect(
+      result
+        ._unsafeUnwrap()
+        .results.some((entry) => entry.entity.content?.includes('kubernetes'))
+    ).toBe(true);
   }, 120_000);
 });

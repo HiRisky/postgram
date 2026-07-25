@@ -23,6 +23,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "benchmark:search": "tsx benchmarks/search-latency.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "migrate": "tsx src/db/migrate.ts"

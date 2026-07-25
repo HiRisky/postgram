@@ -4,6 +4,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { Pool } from 'pg';
+import type { Logger } from 'pino';
 
 import { createAuthMiddleware } from './auth/middleware.js';
 import { ensureFirstRunBootstrapToken } from './auth/admin-service.js';
@@ -59,6 +60,8 @@ type AppVariables = {
 type AppOptions = {
   pool?: Pool;
   embeddingService?: EmbeddingService | undefined;
+  searchEmbeddingBudgetMs?: number | undefined;
+  logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
   extractionEnabled?: boolean | undefined;
   oauth?:
     | {
@@ -273,12 +276,16 @@ export function createApp(
     app.use('/api/*', createAuthMiddleware({ pool: options.pool }));
     registerRestRoutes(app, options.pool, {
       embeddingService: options.embeddingService,
+      searchEmbeddingBudgetMs: options.searchEmbeddingBudgetMs,
+      logger: options.logger,
       ...(options.extractionEnabled !== undefined
         ? { extractionEnabled: options.extractionEnabled }
         : {})
     });
     registerMcpRoutes(app, options.pool, {
       embeddingService: options.embeddingService,
+      searchEmbeddingBudgetMs: options.searchEmbeddingBudgetMs,
+      logger: options.logger,
       resourceMetadataUrl:
         options.oauth?.enabled && options.oauth.publicBaseUrl
           ? `${options.oauth.publicBaseUrl.replace(/\/$/, '')}/.well-known/oauth-protected-resource/mcp`
@@ -508,6 +515,8 @@ export async function startServer(): Promise<{
   const app = createApp({
     pool,
     embeddingService,
+    searchEmbeddingBudgetMs: runtimeConfig.SEARCH_EMBEDDING_BUDGET_MS,
+    logger,
     extractionEnabled: runtimeConfig.EXTRACTION_ENABLED,
     adminMfaSecretKey: config.ADMIN_MFA_SECRET_KEY,
     adminSettingsEncryptionKey: config.ADMIN_SETTINGS_ENCRYPTION_KEY,

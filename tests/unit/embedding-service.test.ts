@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createEmbeddingService } from '../../src/services/embedding-service.js';
+import {
+  createEmbeddingService,
+  createQueryEmbeddingCacheKey
+} from '../../src/services/embedding-service.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/providers.js';
 
 type ProviderWithMocks = EmbeddingProvider & {
@@ -86,10 +89,16 @@ describe('embedding-service', () => {
     const service = createEmbeddingService({ provider });
 
     const [first, second] = await Promise.all([
-      service.embedQuery('postgres search', activeModel),
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, {
+        cacheScope: 'key-a'
+      }),
+      service.embedQuery('postgres search', activeModel, {
+        cacheScope: 'key-a'
+      })
     ]);
-    const third = await service.embedQuery('postgres search', activeModel);
+    const third = await service.embedQuery('postgres search', activeModel, {
+      cacheScope: 'key-a'
+    });
 
     expect(first).toEqual([0.25, 0.75]);
     expect(second).toEqual(first);
@@ -101,10 +110,14 @@ describe('embedding-service', () => {
     const provider = makeProvider();
     const service = createEmbeddingService({ provider });
 
-    await service.embedQuery('postgres search', activeModel);
+    await service.embedQuery('postgres search', activeModel, {
+      cacheScope: 'key-a'
+    });
     await service.embedQuery('postgres search', {
       ...activeModel,
       id: 'model-2'
+    }, {
+      cacheScope: 'key-a'
     });
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
@@ -118,12 +131,108 @@ describe('embedding-service', () => {
     const service = createEmbeddingService({ provider });
 
     await expect(
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, {
+        cacheScope: 'key-a'
+      })
     ).rejects.toThrow('provider unavailable');
     await expect(
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, {
+        cacheScope: 'key-a'
+      })
     ).resolves.toEqual([0.25, 0.75]);
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share cached query embeddings across API key scopes', async () => {
+    const provider = makeProvider();
+    const service = createEmbeddingService({ provider });
+
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'key-a'
+    });
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'key-b'
+    });
+
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('bypasses the query cache without an authenticated scope', async () => {
+    const provider = makeProvider();
+    const service = createEmbeddingService({ provider });
+
+    await service.embedQuery('private roadmap', activeModel);
+    await service.embedQuery('private roadmap', activeModel);
+
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('expires cached query embeddings after the configured TTL', async () => {
+    const provider = makeProvider();
+    let now = 1_000;
+    const service = createEmbeddingService({
+      provider,
+      queryCacheTtlMs: 100,
+      now: () => now
+    });
+
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'key-a'
+    });
+    now += 101;
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'key-a'
+    });
+
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts the least recently used query when the cache is full', async () => {
+    const provider = makeProvider();
+    const service = createEmbeddingService({
+      provider,
+      queryCacheMaxSize: 2
+    });
+    const options = { cacheScope: 'key-a' };
+
+    await service.embedQuery('query one', activeModel, options);
+    await service.embedQuery('query two', activeModel, options);
+    await service.embedQuery('query one', activeModel, options);
+    await service.embedQuery('query three', activeModel, options);
+    await service.embedQuery('query two', activeModel, options);
+
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('reports cache misses, hits, and unauthenticated bypasses', async () => {
+    const provider = makeProvider();
+    const service = createEmbeddingService({ provider });
+    const statuses: string[] = [];
+    const options = {
+      cacheScope: 'key-a',
+      onCacheStatus: (status: string) => statuses.push(status)
+    };
+
+    await service.embedQuery('private roadmap', activeModel, options);
+    await service.embedQuery('private roadmap', activeModel, options);
+    await service.embedQuery('private roadmap', activeModel, {
+      onCacheStatus: (status) => statuses.push(status)
+    });
+
+    expect(statuses).toEqual(['miss', 'hit', 'bypass']);
+  });
+
+  it('uses an opaque cache key that does not retain plaintext query text', () => {
+    const key = createQueryEmbeddingCacheKey(
+      'test-secret',
+      'key-a',
+      activeModel,
+      'private roadmap'
+    );
+
+    expect(key).toMatch(/^[a-f0-9]{64}$/u);
+    expect(key).not.toContain('private roadmap');
+    expect(key).not.toContain('key-a');
   });
 });

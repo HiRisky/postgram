@@ -85,6 +85,9 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fallbackReason, setFallbackReason] = useState<
+    'embedding_timeout' | 'embedding_error' | null
+  >(null);
   const [totalCount, setTotalCount] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [nextOffset, setNextOffset] = useState(0);
@@ -114,9 +117,9 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
     setFilters(prev => ({ ...prev, [key]: value }));
   }, []);
 
-  const fetchPage = useCallback(async (f: Filters, offset: number): Promise<{ items: ResultItem[]; total: number | null; hasMore: boolean }> => {
+  const fetchPage = useCallback(async (f: Filters, offset: number): Promise<{ items: ResultItem[]; total: number | null; hasMore: boolean; fallbackReason: 'embedding_timeout' | 'embedding_error' | null }> => {
     if (f.mode === 'semantic' && f.query.trim()) {
-      if (offset > 0) return { items: [], total: null, hasMore: false };
+      if (offset > 0) return { items: [], total: null, hasMore: false, fallbackReason: null };
       const primaryType = f.memoryRole ? 'memory' : f.types.size === 1 ? [...f.types][0] : undefined;
       const res = await api.searchEntities({
         query: f.query,
@@ -140,7 +143,7 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
       }));
       if (!f.memoryRole && f.types.size > 1) items = items.filter(i => f.types.has(i.entity.type));
       if (f.statuses.size > 0) items = items.filter(i => i.entity.status && f.statuses.has(i.entity.status));
-      return { items, total: items.length, hasMore: false };
+      return { items, total: items.length, hasMore: false, fallbackReason: res.fallback_reason ?? null };
     }
 
     const primaryType = f.memoryRole ? 'memory' : f.types.size === 1 ? [...f.types][0] : undefined;
@@ -171,6 +174,7 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
       items: items.map(e => ({ entity: e })),
       total: res.total,
       hasMore: pageHasMore,
+      fallbackReason: null,
     };
   }, [api]);
 
@@ -180,6 +184,7 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
     try {
       const page = await fetchPage(f, 0);
       setResults(page.items);
+      setFallbackReason(page.fallbackReason);
       setSelectedResultIds(new Set());
       setLastSelectionAnchorId(null);
       setTotalCount(page.total);
@@ -189,6 +194,7 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Search failed');
       setResults([]);
+      setFallbackReason(null);
       setSelectedResultIds(new Set());
       setLastSelectionAnchorId(null);
       setTotalCount(null);
@@ -654,6 +660,11 @@ export default function SearchPage({ api, onOpenInGraph }: Props) {
             {error && (
               <div className="mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300">
                 {error}
+              </div>
+            )}
+            {fallbackReason && (
+              <div className="mb-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-300">
+                Semantic search {fallbackReason === 'embedding_timeout' ? 'timed out' : 'failed'}; showing keyword matches.
               </div>
             )}
             {!loading && results.length === 0 && !error && (

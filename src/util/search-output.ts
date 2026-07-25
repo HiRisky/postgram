@@ -1,4 +1,6 @@
 export type FullSearchResponse = {
+  search_mode: 'hybrid' | 'lexical_fallback';
+  fallback_reason?: 'embedding_timeout' | 'embedding_error';
   results: Array<{
     entity: {
       id: string;
@@ -103,6 +105,8 @@ export type CompactGraphResponse = {
 };
 
 export type CompactSearchResponse = {
+  search_mode: 'hybrid' | 'lexical_fallback';
+  fallback_reason?: 'embedding_timeout' | 'embedding_error';
   results: CompactSearchResult[];
 };
 
@@ -204,6 +208,10 @@ export function compactSearchResponse(
   response: FullSearchResponse
 ): CompactSearchResponse {
   return {
+    search_mode: response.search_mode,
+    ...(response.fallback_reason
+      ? { fallback_reason: response.fallback_reason }
+      : {}),
     results: response.results.map((entry) => ({
       id: entry.entity.id,
       type: entry.entity.type,
@@ -266,6 +274,7 @@ function formatEdgeSummary(edges?: CompactSearchEdgeSummary): string {
 
 export function searchResponseToToon(response: CompactSearchResponse): string {
   const lines = [
+    `search_mode:${response.search_mode}${response.fallback_reason ? `,fallback_reason:${response.fallback_reason}` : ''}`,
     `results[${response.results.length}]{id,type,score,content,chunk,tags,edges,related}:`
   ];
 

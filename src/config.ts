@@ -30,6 +30,10 @@ const configSchema = z
       .int()
       .positive()
       .default(1000),
+    SEARCH_EMBEDDING_BUDGET_MS: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().default(350)
+    ),
     EXTRACTION_ENABLED: z
       .enum(['true', 'false'])
       .default('false')

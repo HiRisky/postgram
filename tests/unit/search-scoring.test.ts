@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   applyRecencyBoost,
@@ -10,6 +10,37 @@ import {
 } from '../../src/services/search-service.js';
 import type { AuthContext } from '../../src/auth/types.js';
 import type { EmbeddingService } from '../../src/services/embedding-service.js';
+
+const searchAuth: AuthContext = {
+  apiKeyId: '00000000-0000-0000-0000-000000000104',
+  keyName: 'search-key',
+  clientId: 'search-key',
+  scopes: ['read'],
+  allowedTypes: null,
+  allowedVisibility: ['personal', 'work', 'shared']
+};
+
+function searchRow(id: string, content: string, score = 0.88) {
+  const createdAt = new Date('2026-06-01T00:00:00.000Z');
+  return {
+    id,
+    type: 'memory',
+    content,
+    visibility: 'personal',
+    owner: null,
+    status: null,
+    enrichment_status: 'completed',
+    version: 1,
+    tags: [],
+    source: null,
+    metadata: {},
+    created_at: createdAt,
+    updated_at: createdAt,
+    chunk_content: content,
+    similarity: 1,
+    score
+  };
+}
 
 describe('applyRecencyBoost', () => {
   it('boosts newer results more than older ones', () => {
@@ -118,6 +149,149 @@ describe('buildSearchEdgeSummaries', () => {
   });
 });
 
+describe('searchEntities embedding budget', () => {
+  function makePool() {
+    const queries: string[] = [];
+    const pool = {
+      query: (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('search_tsvector @@')) {
+          return Promise.resolve({
+            rows: [
+              {
+                ...searchRow(
+                  '00000000-0000-0000-0000-000000000010',
+                  'lexical fallback'
+                ),
+                similarity: 0
+              }
+            ]
+          });
+        }
+        if (sql.includes('FROM chunks c')) {
+          return Promise.resolve({
+            rows: [
+              searchRow(
+                '00000000-0000-0000-0000-000000000011',
+                'hybrid result'
+              )
+            ]
+          });
+        }
+        if (sql.includes('FROM unnest($1::uuid[]) AS anchor')) {
+          return Promise.resolve({ rows: [] });
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      }
+    };
+    return { pool: pool as never, queries };
+  }
+
+  function makeEmbeddingService(
+    embedQuery: EmbeddingService['embedQuery']
+  ): EmbeddingService {
+    return {
+      dimensions: 3,
+      embedBatch: () => Promise.resolve([[1, 0, 0]]),
+      embedQuery,
+      getActiveModel: () =>
+        Promise.resolve({
+          id: '00000000-0000-0000-0000-0000000000aa',
+          name: 'test-model',
+          provider: 'deterministic',
+          dimensions: 3,
+          chunkSize: 1000,
+          chunkOverlap: 100,
+          metadata: {},
+          createdAt: '2026-06-01T00:00:00.000Z'
+        })
+    };
+  }
+
+  it('returns hybrid results when embedding completes within budget', async () => {
+    const { pool, queries } = makePool();
+    const embedQuery = vi.fn().mockResolvedValue([1, 0, 0]);
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0 },
+      {
+        embeddingService: makeEmbeddingService(embedQuery),
+        embeddingBudgetMs: 50
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap()).toMatchObject({
+      searchMode: 'hybrid',
+      results: [{ chunkContent: 'hybrid result' }]
+    });
+    expect(embedQuery).toHaveBeenCalledWith(
+      'postgres search',
+      expect.any(Object),
+      expect.objectContaining({ cacheScope: searchAuth.apiKeyId })
+    );
+    expect(queries.some((sql) => sql.includes('search_tsvector @@'))).toBe(
+      true
+    );
+  });
+
+  it('returns lexical results when embedding exceeds the budget', async () => {
+    const { pool } = makePool();
+    const never = new Promise<number[]>(() => undefined);
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0 },
+      {
+        embeddingService: makeEmbeddingService(() => never),
+        embeddingBudgetMs: 1
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap()).toMatchObject({
+      searchMode: 'lexical_fallback',
+      fallbackReason: 'embedding_timeout',
+      results: [{ chunkContent: 'lexical fallback', similarity: 0 }]
+    });
+  });
+
+  it('returns lexical results when the embedding provider fails', async () => {
+    const { pool } = makePool();
+    const warn = vi.fn();
+    const debug = vi.fn();
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0 },
+      {
+        embeddingService: makeEmbeddingService(() =>
+          Promise.reject(
+            new Error('provider unavailable for private roadmap and key-secret')
+          )
+        ),
+        embeddingBudgetMs: 50,
+        logger: { warn, debug }
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(result._unsafeUnwrap()).toMatchObject({
+      searchMode: 'lexical_fallback',
+      fallbackReason: 'embedding_error',
+      results: [{ chunkContent: 'lexical fallback' }]
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(debug).not.toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('private roadmap');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('key-secret');
+  });
+});
+
 describe('searchEntities graph expansion', () => {
   it('derives edge summaries from expanded graph rows without a standalone summary query', async () => {
     const anchorId = '00000000-0000-0000-0000-000000000001';
@@ -189,15 +363,6 @@ describe('searchEntities graph expansion', () => {
       }
     };
 
-    const auth: AuthContext = {
-      apiKeyId: '00000000-0000-0000-0000-000000000104',
-      keyName: 'search-key',
-      clientId: 'search-key',
-      scopes: ['read'],
-      allowedTypes: null,
-      allowedVisibility: ['personal', 'work', 'shared']
-    };
-
     const embeddingService: EmbeddingService = {
       dimensions: 3,
       embedBatch: () => Promise.resolve([[1, 0, 0]]),
@@ -216,7 +381,7 @@ describe('searchEntities graph expansion', () => {
 
     const result = await searchEntities(
       pool as never,
-      auth,
+      searchAuth,
       {
         query: 'compact search',
         threshold: 0,
@@ -247,8 +412,6 @@ describe('searchEntities graph expansion', () => {
     expect(
       queries.some((sql) => sql.includes('FROM unnest($1::uuid[]) AS anchor'))
     ).toBe(false);
-    expect(queries.find((sql) => sql.includes('FROM chunks c'))).toContain(
-      'ROW_NUMBER() OVER'
-    );
+    expect(queries.some((sql) => sql.includes('ROW_NUMBER() OVER'))).toBe(true);
   });
 });

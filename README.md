@@ -642,6 +642,7 @@ those values outside database backups and browser storage.
 | `EMBEDDING_DIMENSIONS` | no                   | per-provider                    | Must match the active `embedding_models` row. Run `./bin/pgm-admin embeddings migrate --target-dimensions <N> --yes` to change. |
 | `EMBEDDING_BASE_URL`   | when provider=ollama | falls back to `OLLAMA_BASE_URL` | Embedding host. Independent from LLM-extraction host so embeddings and inference can target different machines.                 |
 | `EMBEDDING_API_KEY`    | no                   |                                 | Optional bearer token for `EMBEDDING_BASE_URL`.                                                                                 |
+| `SEARCH_EMBEDDING_BUDGET_MS` | no             | `350`                           | Maximum wait for a query embedding before search returns clearly marked lexical fallback results. Provider failures also fall back immediately. |
 
 When Postgram runs in Docker and Ollama runs directly on the Docker host, use `http://host.docker.internal:11434` for `EMBEDDING_BASE_URL`; `localhost` inside the container points at the Postgram container, not the host machine.
 
@@ -1281,7 +1282,13 @@ npm test            # all tests
 npm run lint        # eslint
 npm run build       # typecheck
 npm run test:coverage
+npm run benchmark:search -- --assert  # 5k-entity/6k-chunk latency gate
 ```
+
+The search benchmark reports p50/p95 latency for uncached hybrid search,
+provider-delayed hybrid search, the timed lexical fallback, and repeated-query
+cache hits. It also records `EXPLAIN (ANALYZE, BUFFERS)` summaries for the
+hybrid and lexical SQL paths.
 
 Targeted suites:
 

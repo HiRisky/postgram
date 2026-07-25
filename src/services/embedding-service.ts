@@ -1,3 +1,5 @@
+import { createHmac, randomBytes } from 'node:crypto';
+
 import type { Pool } from 'pg';
 
 import { AppError, ErrorCode } from '../util/errors.js';
@@ -5,6 +7,7 @@ import type { EmbeddingProvider } from './embeddings/providers.js';
 
 const DEFAULT_DIMENSIONS = 1536;
 const QUERY_EMBEDDING_CACHE_SIZE = 256;
+const QUERY_EMBEDDING_CACHE_TTL_MS = 5 * 60 * 1000;
 
 type EmbeddingMode = 'deterministic' | 'provider';
 
@@ -39,9 +42,40 @@ type EmbeddingServiceOptions = {
   embedQuery?:
     | ((text: string, model?: ActiveEmbeddingModel) => Promise<number[]>)
     | undefined;
+  queryCacheMaxSize?: number | undefined;
+  queryCacheSecret?: string | Buffer | undefined;
+  queryCacheTtlMs?: number | undefined;
+  now?: (() => number) | undefined;
+};
+
+export type QueryEmbeddingCacheStatus = 'bypass' | 'hit' | 'miss';
+
+export type QueryEmbeddingOptions = {
+  cacheScope?: string | undefined;
+  onCacheStatus?: ((status: QueryEmbeddingCacheStatus) => void) | undefined;
 };
 
 export type EmbeddingService = ReturnType<typeof createEmbeddingService>;
+
+export function createQueryEmbeddingCacheKey(
+  secret: string | Buffer,
+  cacheScope: string,
+  model: ActiveEmbeddingModel,
+  text: string
+): string {
+  return createHmac('sha256', secret)
+    .update(
+      JSON.stringify([
+        cacheScope,
+        model.id,
+        model.provider,
+        model.name,
+        model.dimensions,
+        text
+      ])
+    )
+    .digest('hex');
+}
 
 function tokenize(text: string): string[] {
   return text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
@@ -151,34 +185,52 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
       return vector;
     });
 
-  const queryEmbeddingCache = new Map<string, Promise<number[]>>();
+  const queryEmbeddingCache = new Map<
+    string,
+    { embedding: Promise<number[]>; expiresAt: number }
+  >();
+  const queryCacheSecret = options.queryCacheSecret ?? randomBytes(32);
+  const queryCacheTtlMs =
+    options.queryCacheTtlMs ?? QUERY_EMBEDDING_CACHE_TTL_MS;
+  const queryCacheMaxSize =
+    options.queryCacheMaxSize ?? QUERY_EMBEDDING_CACHE_SIZE;
+  const now = options.now ?? Date.now;
 
   function embedCachedQuery(
     text: string,
-    model?: ActiveEmbeddingModel
+    model?: ActiveEmbeddingModel,
+    queryOptions: QueryEmbeddingOptions = {}
   ): Promise<number[]> {
-    if (!model) {
+    if (!model || !queryOptions.cacheScope) {
+      queryOptions.onCacheStatus?.('bypass');
       return embedQueryImpl(text, model);
     }
 
-    const cacheKey = JSON.stringify([
-      model.id,
-      model.provider,
-      model.name,
-      model.dimensions,
+    const cacheKey = createQueryEmbeddingCacheKey(
+      queryCacheSecret,
+      queryOptions.cacheScope,
+      model,
       text
-    ]);
+    );
     const cached = queryEmbeddingCache.get(cacheKey);
-    if (cached) {
+    if (cached && cached.expiresAt > now()) {
       queryEmbeddingCache.delete(cacheKey);
       queryEmbeddingCache.set(cacheKey, cached);
-      return cached;
+      queryOptions.onCacheStatus?.('hit');
+      return cached.embedding;
+    }
+    if (cached) {
+      queryEmbeddingCache.delete(cacheKey);
     }
 
     const embedding = embedQueryImpl(text, model);
-    queryEmbeddingCache.set(cacheKey, embedding);
+    queryEmbeddingCache.set(cacheKey, {
+      embedding,
+      expiresAt: now() + queryCacheTtlMs
+    });
+    queryOptions.onCacheStatus?.('miss');
 
-    if (queryEmbeddingCache.size > QUERY_EMBEDDING_CACHE_SIZE) {
+    if (queryEmbeddingCache.size > queryCacheMaxSize) {
       const oldestKey = queryEmbeddingCache.keys().next().value;
       if (oldestKey !== undefined) {
         queryEmbeddingCache.delete(oldestKey);
@@ -186,7 +238,7 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
     }
 
     void embedding.catch(() => {
-      if (queryEmbeddingCache.get(cacheKey) === embedding) {
+      if (queryEmbeddingCache.get(cacheKey)?.embedding === embedding) {
         queryEmbeddingCache.delete(cacheKey);
       }
     });
@@ -204,9 +256,10 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
     },
     async embedQuery(
       text: string,
-      model?: ActiveEmbeddingModel
+      model?: ActiveEmbeddingModel,
+      queryOptions?: QueryEmbeddingOptions
     ): Promise<number[]> {
-      return embedCachedQuery(text, model);
+      return embedCachedQuery(text, model, queryOptions);
     },
     async getActiveModel(pool: Pool): Promise<ActiveEmbeddingModel> {
       const result = await pool.query<ActiveModelRow>(

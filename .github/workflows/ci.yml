@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm --prefix ui ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - run: npm --prefix ui run typecheck
+      - run: npm --prefix ui run build
+      - run: npm --prefix ui test
+
+  search-performance:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run search latency gate
+        run: npm run benchmark:search -- --assert | tee search-latency.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: search-latency
+          path: search-latency.json

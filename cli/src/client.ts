@@ -19,6 +19,8 @@ export type StoredEntityResponse = {
 };
 
 export type SearchResponse = {
+  search_mode: 'hybrid' | 'lexical_fallback';
+  fallback_reason?: 'embedding_timeout' | 'embedding_error';
   results: Array<{
     entity: StoredEntityResponse['entity'];
     chunk_content: string;

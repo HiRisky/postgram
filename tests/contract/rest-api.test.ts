@@ -1168,7 +1168,7 @@ describe('REST entity endpoints', () => {
     expect(contents).not.toContain('Other scoped durable memory for REST bypass regression.');
   }, 120_000);
 
-  it('returns EMBEDDING_FAILED when query embedding fails', async () => {
+  it('returns marked lexical fallback when query embedding fails', async () => {
     const { app, apiKey } = await createAuthorizedApp({
       embeddingService: createEmbeddingService({
         embedQuery: () =>
@@ -1193,13 +1193,11 @@ describe('REST entity endpoints', () => {
     });
     const body: unknown = await response.json();
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(200);
     expect(body).toEqual({
-      error: {
-        code: ErrorCode.EMBEDDING_FAILED,
-        message: 'forced query embedding failure',
-        details: {}
-      }
+      search_mode: 'lexical_fallback',
+      fallback_reason: 'embedding_error',
+      results: []
     });
   }, 120_000);
 

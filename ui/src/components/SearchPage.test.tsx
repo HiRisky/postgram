@@ -186,6 +186,40 @@ describe('SearchPage result selection', () => {
     });
   });
 
+  it('warns when semantic search falls back to keyword matching', async () => {
+    const fallbackEntity = entity({
+      id: 'entity-fallback',
+      content: 'Keyword fallback result',
+    });
+    const { api, user } = await renderSearchPage([
+      entity({ content: 'Initial browse result' }),
+    ]);
+    vi.mocked(api.searchEntities).mockResolvedValue({
+      search_mode: 'lexical_fallback',
+      fallback_reason: 'embedding_timeout',
+      results: [
+        {
+          entity: fallbackEntity,
+          chunk_content: fallbackEntity.content!,
+          similarity: 0,
+          score: 0.5,
+        },
+      ],
+    });
+
+    await user.type(
+      screen.getByPlaceholderText(/search everything/i),
+      'keyword fallback'
+    );
+
+    expect(
+      await screen.findByText(
+        'Semantic search timed out; showing keyword matches.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText('Keyword fallback result')).toBeInTheDocument();
+  });
+
   it('shift-click selects a visible result range from the previous anchor', async () => {
     const { user } = await renderSearchPage([
       entity({ id: 'entity-1', content: 'First cleanup candidate' }),

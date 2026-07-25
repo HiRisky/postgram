@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { Pool } from 'pg';
+import type { Logger } from 'pino';
 
 import type { AuthContext } from '../auth/types.js';
 import { checkTypeAccess, requireScope } from '../auth/key-service.js';
@@ -269,6 +270,8 @@ export function registerRestRoutes(
   pool: Pool,
   options: {
     embeddingService?: EmbeddingService | undefined;
+    searchEmbeddingBudgetMs?: number | undefined;
+    logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
   } = {}
 ): void {
@@ -535,7 +538,9 @@ export function registerRestRoutes(
         memoryRole: body.memory_role
       },
       {
-        embeddingService: options.embeddingService
+        embeddingService: options.embeddingService,
+        embeddingBudgetMs: options.searchEmbeddingBudgetMs,
+        logger: options.logger
       }
     );
 
@@ -544,6 +549,10 @@ export function registerRestRoutes(
     }
 
     return c.json({
+      search_mode: result.value.searchMode,
+      ...(result.value.fallbackReason
+        ? { fallback_reason: result.value.fallbackReason }
+        : {}),
       results: result.value.results.map((entry) => ({
         entity: toStoredEntity(entry.entity),
         chunk_content: entry.chunkContent,

@@ -534,7 +534,13 @@ program
           : compactSearchResponse(body);
       }
 
-      return formatSearchResults(body.results);
+      const lines = formatSearchResults(body.results);
+      if (body.search_mode === 'lexical_fallback') {
+        lines.unshift(
+          `Warning: semantic search ${body.fallback_reason === 'embedding_timeout' ? 'timed out' : 'failed'}; showing lexical matches.`
+        );
+      }
+      return lines;
     });
   });
 

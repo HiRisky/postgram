@@ -560,7 +560,28 @@ Latency:
 
 - Store should be comfortably below 200 ms excluding background enrichment
 - Recall should be below 200 ms
-- Search should be below 500 ms
+- Hybrid search should be below 500 ms when the embedding provider responds
+  within `SEARCH_EMBEDDING_BUDGET_MS`
+- If the embedding exceeds the budget, search should return keyword matches
+  with `search_mode: "lexical_fallback"` and
+  `fallback_reason: "embedding_timeout"` instead of waiting for the provider
+- If the embedding provider fails, the same fallback should return with
+  `fallback_reason: "embedding_error"`
+
+Run the reproducible search latency gate (Docker is required for its isolated
+PostgreSQL/pgvector database):
+
+```bash
+npm run benchmark:search -- --assert
+```
+
+Expected:
+
+- The fixture contains 5,000 entities and 6,000 chunks
+- All four profiles stay under their p95 thresholds
+- The report includes hybrid and lexical `EXPLAIN (ANALYZE, BUFFERS)` summaries
+- REST, MCP, CLI, and UI output clearly distinguish hybrid results from lexical
+  fallback results
 
 Resource:
 

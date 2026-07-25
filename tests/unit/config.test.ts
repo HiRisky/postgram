@@ -10,6 +10,17 @@ function baseEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 describe('config', () => {
+  it('defaults and validates the search embedding latency budget', () => {
+    expect(loadConfig(baseEnv()).SEARCH_EMBEDDING_BUDGET_MS).toBe(350);
+    expect(
+      loadConfig(baseEnv({ SEARCH_EMBEDDING_BUDGET_MS: '725' }))
+        .SEARCH_EMBEDDING_BUDGET_MS
+    ).toBe(725);
+    expect(() =>
+      loadConfig(baseEnv({ SEARCH_EMBEDDING_BUDGET_MS: '0' }))
+    ).toThrow();
+  });
+
   it('parses an Ollama-only config without OPENAI_API_KEY', () => {
     const cfg = loadConfig(
       baseEnv({

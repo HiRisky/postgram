@@ -44,6 +44,12 @@ export type SearchResult = {
   }>;
 };
 
+export type SearchResponse = {
+  search_mode: 'hybrid' | 'lexical_fallback';
+  fallback_reason?: 'embedding_timeout' | 'embedding_error';
+  results: SearchResult[];
+};
+
 export type QueueStatus = {
   embedding: {
     pending: number;
