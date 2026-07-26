@@ -221,39 +221,70 @@ async function pendingCount(pool: Pool): Promise<number> {
 }
 
 /**
- * Wraps the pool so time spent waiting for a free connection is separable
- * from time spent executing SQL. If the worker were starving the pool, this
- * is the number that would move.
+ * Records time spent waiting for a free connection, separately from time spent
+ * executing SQL. If the worker were starving the pool, this is the number that
+ * would move.
+ *
+ * The instance method is replaced in place rather than wrapped in a Proxy.
+ * `pool.query()` acquires its connection through an internal `this.connect(cb)`
+ * (pg-pool/index.js), so a proxy that returns `query` bound to the underlying
+ * pool never routes that acquisition back through the wrapper: every
+ * query-path wait went unrecorded, and only callers that invoked `connect()`
+ * explicitly — the enrichment worker — were ever counted. Patching the
+ * instance captures both paths.
+ *
+ * `connect` is dual-form: with a callback it returns undefined and invokes
+ * `cb(err, client, release)`; without one it returns a promise. `query` uses
+ * the callback form, so both have to be handled.
  */
 function instrumentPool(pool: Pool): {
   pool: Pool;
   waits: number[];
   reset: () => void;
+  restore: () => void;
 } {
   const waits: number[] = [];
-  const instrumented = new Proxy(pool, {
-    get(target, property, receiver) {
-      if (property === 'connect') {
-        return async (...args: unknown[]) => {
-          const started = performance.now();
-          const client = await (
-            target.connect as (...a: unknown[]) => Promise<unknown>
-          )(...args);
-          waits.push(performance.now() - started);
-          return client;
-        };
-      }
-      const value: unknown = Reflect.get(target, property, receiver);
-      return typeof value === 'function'
-        ? (value.bind(target) as unknown)
-        : value;
+  // `connect` is overloaded, so the patched function is installed through an
+  // unknown-typed view rather than fighting the overload signature.
+  const slot = pool as unknown as { connect: unknown };
+  const original = (pool.connect as (...args: unknown[]) => unknown).bind(pool);
+
+  const patched = (...args: unknown[]): unknown => {
+    const started = performance.now();
+    const callback = args[0];
+
+    if (typeof callback === 'function') {
+      return original((...acquisition: unknown[]) => {
+        waits.push(performance.now() - started);
+        (callback as (...a: unknown[]) => void)(...acquisition);
+      });
     }
-  });
+
+    const acquired = original(...args) as Promise<unknown>;
+    return acquired.then(
+      (client) => {
+        waits.push(performance.now() - started);
+        return client;
+      },
+      (error) => {
+        // A failed acquisition still consumed wait time; recording it keeps a
+        // pool that is refusing connections from looking instantaneous.
+        waits.push(performance.now() - started);
+        throw error;
+      }
+    );
+  };
+
+  slot.connect = patched;
+
   return {
-    pool: instrumented,
+    pool,
     waits,
     reset: () => {
       waits.length = 0;
+    },
+    restore: () => {
+      slot.connect = original;
     }
   };
 }
@@ -394,9 +425,10 @@ async function runPhase(
 
 const database = await createTestDatabase();
 let report: unknown;
+let instrumented: ReturnType<typeof instrumentPool> | undefined;
 try {
   await seed(database.pool);
-  const instrumented = instrumentPool(database.pool);
+  instrumented = instrumentPool(database.pool);
 
   // Cache-hit searches first: with no provider round trip in the measurement,
   // any latency the worker adds has nowhere to hide.
@@ -488,6 +520,7 @@ try {
     }
   }
 } finally {
+  instrumented?.restore();
   await database.close();
   if (report !== undefined) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

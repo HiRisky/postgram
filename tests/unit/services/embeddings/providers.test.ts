@@ -54,16 +54,18 @@ describe('OpenAI embedding provider', () => {
     const vectors = await provider.embedBatch(['a', 'b']);
 
     expect(vectors).toEqual([[0.3, 0.4], [0.1, 0.2]]);
-    expect(create).toHaveBeenCalledWith(
-      {
-        model: 'text-embedding-3-small',
-        input: ['a', 'b'],
-        encoding_format: 'float',
-        dimensions: 2
-      },
-      // Deadline signal spanning all retry attempts.
-      { signal: expect.any(AbortSignal) }
-    );
+    const [params, options] = create.mock.calls[0] as [
+      Record<string, unknown>,
+      { signal?: AbortSignal } | undefined
+    ];
+    expect(params).toEqual({
+      model: 'text-embedding-3-small',
+      input: ['a', 'b'],
+      encoding_format: 'float',
+      dimensions: 2
+    });
+    // Deadline signal spanning all retry attempts.
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('throws EMBEDDING_FAILED on dimension mismatch', async () => {
