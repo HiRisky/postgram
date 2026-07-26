@@ -369,7 +369,16 @@ describe('createAdminApiClient backup methods', () => {
     const backup = await createAdminApiClient().downloadBackup();
 
     expect(backup.filename).toBe('postgram-backup-test.tar.gz');
-    expect(backup.blob).toBeInstanceOf(Blob);
+    // Node and jsdom each define a `Blob`, and both exist at once under the
+    // jsdom test environment. Which constructor the bare `Blob` identifier
+    // resolves to differs between macOS and the Linux CI runner, so
+    // `toBeInstanceOf(Blob)` passes locally and fails in CI. The Blob reaching
+    // this assertion also carries only `slice`/`size`/`type` — no `text()` or
+    // `arrayBuffer()` — so those are not portable either. Assert on size and
+    // type, which every implementation provides, and which are what the caller
+    // actually depends on.
+    expect(backup.blob.type).toBe('application/gzip');
+    expect(backup.blob.size).toBe('backup-archive'.length);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
