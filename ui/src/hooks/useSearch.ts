@@ -15,16 +15,18 @@ export function useSearch(api: ApiClient) {
       setResults([]);
       return;
     }
-    timerRef.current = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const res = await api.searchEntities({ query: q, limit: 20 });
-        setResults(res.results);
-      } catch {
-        setResults([]);
-      } finally {
-        setLoading(false);
-      }
+    timerRef.current = setTimeout(() => {
+      void (async () => {
+        setLoading(true);
+        try {
+          const res = await api.searchEntities({ query: q, limit: 20 });
+          setResults(res.results);
+        } catch {
+          setResults([]);
+        } finally {
+          setLoading(false);
+        }
+      })();
     }, 300);
   }, [api]);
 

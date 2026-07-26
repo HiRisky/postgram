@@ -1,6 +1,7 @@
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { Pool } from 'pg';
+import type { Logger } from 'pino';
 
 import type { AuthContext } from '../auth/types.js';
 import { checkTypeAccess, requireScope } from '../auth/key-service.js';
@@ -269,6 +270,7 @@ export function registerRestRoutes(
   pool: Pool,
   options: {
     embeddingService?: EmbeddingService | undefined;
+    logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
   } = {}
 ): void {
@@ -535,7 +537,8 @@ export function registerRestRoutes(
         memoryRole: body.memory_role
       },
       {
-        embeddingService: options.embeddingService
+        embeddingService: options.embeddingService,
+        logger: options.logger
       }
     );
 

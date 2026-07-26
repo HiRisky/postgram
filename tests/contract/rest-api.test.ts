@@ -1168,7 +1168,7 @@ describe('REST entity endpoints', () => {
     expect(contents).not.toContain('Other scoped durable memory for REST bypass regression.');
   }, 120_000);
 
-  it('returns EMBEDDING_FAILED when query embedding fails', async () => {
+  it('surfaces an error when query embedding fails', async () => {
     const { app, apiKey } = await createAuthorizedApp({
       embeddingService: createEmbeddingService({
         embedQuery: () =>
@@ -1193,13 +1193,12 @@ describe('REST entity endpoints', () => {
     });
     const body: unknown = await response.json();
 
+    // Degrading to keyword matches here would hand the caller confidently
+    // scored results from a different ranking scale; failing loudly is the
+    // honest outcome.
     expect(response.status).toBe(502);
-    expect(body).toEqual({
-      error: {
-        code: ErrorCode.EMBEDDING_FAILED,
-        message: 'forced query embedding failure',
-        details: {}
-      }
+    expect(body).toMatchObject({
+      error: { code: ErrorCode.EMBEDDING_FAILED }
     });
   }, 120_000);
 

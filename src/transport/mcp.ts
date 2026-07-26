@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { Pool } from 'pg';
+import type { Logger } from 'pino';
 
 import {
   checkTypeAccess,
@@ -293,6 +294,7 @@ function createSessionServer(
   auth: AuthContext,
   options: {
     embeddingService?: EmbeddingService | undefined;
+    logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
   } = {}
 ) {
@@ -555,7 +557,8 @@ function createSessionServer(
             memoryRole: args.memory_role,
           },
           {
-            embeddingService: options.embeddingService
+            embeddingService: options.embeddingService,
+            logger: options.logger
           }
         ),
         (value) => ({
@@ -959,6 +962,7 @@ export function registerMcpRoutes(
   pool: Pool,
   options: {
     embeddingService?: EmbeddingService | undefined;
+    logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
     resourceMetadataUrl?: string | undefined;
   } = {}

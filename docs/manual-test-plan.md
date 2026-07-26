@@ -560,7 +560,32 @@ Latency:
 
 - Store should be comfortably below 200 ms excluding background enrichment
 - Recall should be below 200 ms
-- Search should be below 500 ms
+- A search whose query embedding is already cached should be dominated by SQL
+  time — repeat the same query twice and confirm the second call is markedly
+  faster than the first
+- Restart the server and repeat that query again: it should still be fast,
+  because the cache lives in `query_embedding_cache` rather than in memory
+- A search whose embedding is not cached costs one provider round trip, bounded
+  by `EMBEDDING_TIMEOUT_MS`
+- If the embedding provider fails or times out, search returns an
+  `EMBEDDING_FAILED` error rather than silently degrading to keyword matches
+
+Run the reproducible search latency gate (Docker is required for its isolated
+PostgreSQL/pgvector database):
+
+```bash
+npm run benchmark:search -- --assert
+```
+
+Expected:
+
+- The fixture contains 5,000 entities and 6,000 chunks
+- All three profiles (`cold_unique_queries`, `memory_cache_hit`,
+  `database_cache_hit`) stay under their p95 thresholds
+- `embedding_calls` reports one call per sample for `cold_unique_queries` and
+  zero for both cache-hit profiles — a cache that stopped working fails here
+  even on a machine fast enough to meet the latency thresholds
+- The report includes a hybrid `EXPLAIN (ANALYZE, BUFFERS)` summary
 
 Resource:
 

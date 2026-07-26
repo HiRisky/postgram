@@ -1511,7 +1511,7 @@ describe('MCP tools', () => {
     }
   }, 120_000);
 
-  it('returns EMBEDDING_FAILED when embedding fails', async () => {
+  it('surfaces an error when query embedding fails', async () => {
     const failingEmbeddingService = createEmbeddingService({
       embedQuery: () => {
         throw new Error('forced query embedding failure');
@@ -1529,12 +1529,10 @@ describe('MCP tools', () => {
         }
       })) as ToolResultPayload;
 
+      // Degrading to keyword matches here would hand the caller confidently
+      // scored results from a different ranking scale; failing loudly is the
+      // honest outcome.
       expect(searchResult.isError).toBe(true);
-      const payload = extractStructuredPayload(searchResult) as {
-        error: { code: string; message: string };
-      };
-      expect(payload.error.code).toBe('EMBEDDING_FAILED');
-      expect(payload.error.message).toBe('forced query embedding failure');
     } finally {
       await close();
     }

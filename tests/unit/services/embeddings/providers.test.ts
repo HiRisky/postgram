@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { APIUserAbortError } from 'openai';
+
 import {
   createEmbeddingProvider,
   createOpenAIEmbeddingProvider,
@@ -52,12 +54,18 @@ describe('OpenAI embedding provider', () => {
     const vectors = await provider.embedBatch(['a', 'b']);
 
     expect(vectors).toEqual([[0.3, 0.4], [0.1, 0.2]]);
-    expect(create).toHaveBeenCalledWith({
+    const [params, options] = create.mock.calls[0] as [
+      Record<string, unknown>,
+      { signal?: AbortSignal } | undefined
+    ];
+    expect(params).toEqual({
       model: 'text-embedding-3-small',
       input: ['a', 'b'],
       encoding_format: 'float',
       dimensions: 2
     });
+    // Deadline signal spanning all retry attempts.
+    expect(options?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('throws EMBEDDING_FAILED on dimension mismatch', async () => {
@@ -137,6 +145,55 @@ describe('OpenAI embedding provider', () => {
     await expect(provider.embed('x')).rejects.toMatchObject({
       code: ErrorCode.EMBEDDING_FAILED,
       message: '401 Unauthorized'
+    });
+  });
+
+  it('passes a deadline signal that spans the whole call, not one attempt', async () => {
+    // The SDK applies `timeout` per HTTP attempt and retries timed-out
+    // attempts, so `timeout` alone cannot bound the operation. The provider
+    // must hand the SDK an AbortSignal covering all attempts.
+    const create = vi.fn().mockResolvedValue({
+      data: [{ index: 0, embedding: [0.1, 0.2] }]
+    });
+    const provider = createOpenAIEmbeddingProvider(
+      {
+        provider: 'openai',
+        model: 'text-embedding-3-small',
+        dimensions: 2,
+        apiKey: 'sk-test',
+        timeoutMs: 5_000
+      },
+      { embeddings: { create } }
+    );
+
+    await provider.embed('x');
+
+    const options = create.mock.calls[0]?.[1] as
+      | { signal?: AbortSignal }
+      | undefined;
+    expect(options?.signal).toBeDefined();
+    expect(options?.signal?.aborted).toBe(false);
+  });
+
+  it('reports an aborted deadline as a timeout rather than a generic failure', async () => {
+    const create = vi.fn().mockImplementation(() => {
+      // Mirrors how the SDK surfaces an aborted signal.
+      return Promise.reject(new APIUserAbortError());
+    });
+    const provider = createOpenAIEmbeddingProvider(
+      {
+        provider: 'openai',
+        model: 'text-embedding-3-small',
+        dimensions: 2,
+        apiKey: 'sk-test',
+        timeoutMs: 1_234
+      },
+      { embeddings: { create } }
+    );
+
+    await expect(provider.embed('x')).rejects.toMatchObject({
+      code: ErrorCode.EMBEDDING_FAILED,
+      message: 'OpenAI embedding call timed out after 1234ms'
     });
   });
 });

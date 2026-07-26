@@ -1,4 +1,4 @@
-import type { Entity, Edge, SearchResult, QueueStatus, GraphData, ListResponse, EntityEmbedding, TaskStatus } from './types.ts';
+import type { Entity, Edge, SearchResponse, QueueStatus, GraphData, ListResponse, EntityEmbedding, TaskStatus } from './types.ts';
 
 type ApiClientOptions = {
   apiKey: string;
@@ -169,7 +169,7 @@ export function createApiClient(options: ApiClientOptions) {
       expand_graph?: boolean;
       include_archived?: boolean;
     }) {
-      return r<{ results: SearchResult[] }>('/api/search', { method: 'POST', body: input });
+      return r<SearchResponse>('/api/search', { method: 'POST', body: input });
     },
 
     expandGraph(entityId: string, params: { depth?: number; relation_types?: string[]; owner?: string } = {}) {
