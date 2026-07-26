@@ -723,9 +723,14 @@ describe('search-service', () => {
     expect(result.isOk()).toBe(true);
     expect(embedCalls).toBe(1);
 
-    const cached = await database.pool.query<{ count: number }>(
-      'SELECT count(*)::int AS count FROM query_embedding_cache'
+    const cached = await database.pool.query<{
+      count: number;
+      client_id: string;
+    }>(
+      `SELECT count(*)::int AS count, min(client_id) AS client_id
+       FROM query_embedding_cache`
     );
     expect(cached.rows[0]?.count).toBe(1);
+    expect(cached.rows[0]?.client_id).toBe(makeAuthContext().clientId);
   }, 120_000);
 });

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 import type { Pool } from 'pg';
 
@@ -43,6 +43,7 @@ type EmbeddingServiceOptions = {
     | ((text: string, model?: ActiveEmbeddingModel) => Promise<number[]>)
     | undefined;
   queryCacheMaxSize?: number | undefined;
+  queryCacheSecret?: string | Buffer | undefined;
   activeModelTtlMs?: number | undefined;
   now?: (() => number) | undefined;
 };
@@ -60,6 +61,12 @@ export type QueryEmbeddingOptions = {
    * across processes. Without it only the in-process cache is consulted.
    */
   pool?: Pool | undefined;
+  /**
+   * Client the query belongs to. Cache entries are partitioned by it so one
+   * client cannot detect another client's queries by timing a cache hit.
+   * Without it the query is not cached at all.
+   */
+  cacheScope?: string | undefined;
   onCacheStatus?: ((status: QueryEmbeddingCacheStatus) => void) | undefined;
 };
 
@@ -69,12 +76,23 @@ export type EmbeddingService = ReturnType<typeof createEmbeddingService>;
  * Keys cache entries by a one-way digest of the query text so the cache never
  * retains plaintext queries — neither in memory nor in Postgres.
  *
- * This is a plain digest rather than a keyed HMAC on purpose: the persisted
- * cache has to be readable by future processes, and a per-process random key
- * could never match a stored row. Reversing a digest requires read access to
- * the table, at which point the attacker already has the entities themselves.
+ * With a secret this is a keyed HMAC, which prevents someone holding a copy of
+ * the table from dictionary-testing guessed queries. The secret must come from
+ * configuration rather than the database: a key stored next to the digests it
+ * protects would defeat exactly that threat.
+ *
+ * Without a secret it is an unkeyed sha256 and offers no protection against
+ * that offline attack — an accepted default, since a reader of this table can
+ * already read every entity in the corpus. It still keeps plaintext queries out
+ * of the database at rest.
  */
-export function createQueryEmbeddingCacheKey(text: string): Buffer {
+export function createQueryEmbeddingCacheKey(
+  text: string,
+  secret?: string | Buffer
+): Buffer {
+  if (secret !== undefined && secret.length > 0) {
+    return createHmac('sha256', secret).update(text, 'utf8').digest();
+  }
   return createHash('sha256').update(text, 'utf8').digest();
 }
 
@@ -245,6 +263,7 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
   const pendingWrites = new Set<Promise<void>>();
   const queryCacheMaxSize =
     options.queryCacheMaxSize ?? QUERY_EMBEDDING_CACHE_SIZE;
+  const queryCacheSecret = options.queryCacheSecret;
   const activeModelTtlMs = options.activeModelTtlMs ?? ACTIVE_MODEL_TTL_MS;
   const now = options.now ?? Date.now;
 
@@ -266,14 +285,15 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
 
   async function readFromDatabase(
     pool: Pool,
+    cacheScope: string,
     model: ActiveEmbeddingModel,
     queryHash: Buffer
   ): Promise<number[] | null> {
     const result = await pool.query<{ embedding: unknown }>(
       `SELECT embedding
        FROM query_embedding_cache
-       WHERE model_id = $1 AND query_hash = $2`,
-      [model.id, queryHash]
+       WHERE client_id = $1 AND model_id = $2 AND query_hash = $3`,
+      [cacheScope, model.id, queryHash]
     );
 
     const embedding = sqlToVector(result.rows[0]?.embedding);
@@ -291,6 +311,7 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
 
   function writeToDatabase(
     pool: Pool,
+    cacheScope: string,
     model: ActiveEmbeddingModel,
     queryHash: Buffer,
     embedding: number[]
@@ -301,10 +322,11 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
     // drain it.
     const write = pool
       .query(
-        `INSERT INTO query_embedding_cache (model_id, query_hash, embedding)
-         VALUES ($1, $2, $3::vector)
-         ON CONFLICT (model_id, query_hash) DO NOTHING`,
-        [model.id, queryHash, vectorToSql(embedding)]
+        `INSERT INTO query_embedding_cache
+           (client_id, model_id, query_hash, embedding)
+         VALUES ($1, $2, $3, $4::vector)
+         ON CONFLICT (client_id, model_id, query_hash) DO NOTHING`,
+        [cacheScope, model.id, queryHash, vectorToSql(embedding)]
       )
       .then(
         () => undefined,
@@ -321,13 +343,16 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
     model?: ActiveEmbeddingModel,
     queryOptions: QueryEmbeddingOptions = {}
   ): Promise<number[]> {
-    if (!model) {
+    const cacheScope = queryOptions.cacheScope;
+    // Without both a model to key on and a client to partition by, caching
+    // would either be incorrect or would pool entries across clients.
+    if (!model || !cacheScope) {
       queryOptions.onCacheStatus?.('bypass');
       return embedQueryImpl(text, model);
     }
 
-    const queryHash = createQueryEmbeddingCacheKey(text);
-    const cacheKey = `${model.id}:${queryHash.toString('hex')}`;
+    const queryHash = createQueryEmbeddingCacheKey(text, queryCacheSecret);
+    const cacheKey = `${cacheScope}:${model.id}:${queryHash.toString('hex')}`;
 
     const cached = memoryCache.get(cacheKey);
     if (cached) {
@@ -346,9 +371,12 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
     const resolution = (async () => {
       if (pool) {
         // A failed cache read must not fail the search.
-        const stored = await readFromDatabase(pool, model, queryHash).catch(
-          () => null
-        );
+        const stored = await readFromDatabase(
+          pool,
+          cacheScope,
+          model,
+          queryHash
+        ).catch(() => null);
         if (stored) {
           rememberInMemory(cacheKey, stored);
           queryOptions.onCacheStatus?.('database_hit');
@@ -360,7 +388,7 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
       const embedding = await embedQueryImpl(text, model);
       rememberInMemory(cacheKey, embedding);
       if (pool) {
-        writeToDatabase(pool, model, queryHash, embedding);
+        writeToDatabase(pool, cacheScope, model, queryHash, embedding);
       }
       return embedding;
     })();

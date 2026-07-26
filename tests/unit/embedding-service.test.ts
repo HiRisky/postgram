@@ -34,13 +34,15 @@ function makeProvider(): ProviderWithMocks {
 function makeCachePool(stored: Map<string, string>): Pool {
   return {
     query: vi.fn((text: string, values: unknown[]) => {
-      const modelId = values[0] as string;
-      const hash = (values[1] as Buffer).toString('hex');
-      const key = `${modelId}:${hash}`;
+      const isInsert = text.includes('INSERT INTO query_embedding_cache');
+      const clientId = values[0] as string;
+      const modelId = values[1] as string;
+      const hash = (values[2] as Buffer).toString('hex');
+      const key = `${clientId}:${modelId}:${hash}`;
 
-      if (text.includes('INSERT INTO query_embedding_cache')) {
+      if (isInsert) {
         if (!stored.has(key)) {
-          stored.set(key, values[2] as string);
+          stored.set(key, values[3] as string);
         }
         return Promise.resolve({ rows: [], rowCount: 1 });
       }
@@ -53,6 +55,8 @@ function makeCachePool(stored: Map<string, string>): Pool {
     })
   } as unknown as Pool;
 }
+
+const SCOPE = { cacheScope: 'client-a' } as const;
 
 describe('embedding-service', () => {
   const activeModel = {
@@ -118,10 +122,10 @@ describe('embedding-service', () => {
     const service = createEmbeddingService({ provider });
 
     const [first, second] = await Promise.all([
-      service.embedQuery('postgres search', activeModel),
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, SCOPE),
+      service.embedQuery('postgres search', activeModel, SCOPE)
     ]);
-    const third = await service.embedQuery('postgres search', activeModel);
+    const third = await service.embedQuery('postgres search', activeModel, SCOPE);
 
     expect(first).toEqual([0.25, 0.75]);
     expect(second).toEqual(first);
@@ -133,11 +137,12 @@ describe('embedding-service', () => {
     const provider = makeProvider();
     const service = createEmbeddingService({ provider });
 
-    await service.embedQuery('postgres search', activeModel);
-    await service.embedQuery('postgres search', {
-      ...activeModel,
-      id: 'model-2'
-    });
+    await service.embedQuery('postgres search', activeModel, SCOPE);
+    await service.embedQuery(
+      'postgres search',
+      { ...activeModel, id: 'model-2' },
+      SCOPE
+    );
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
   });
@@ -150,10 +155,10 @@ describe('embedding-service', () => {
     const service = createEmbeddingService({ provider });
 
     await expect(
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, SCOPE)
     ).rejects.toThrow('provider unavailable');
     await expect(
-      service.embedQuery('postgres search', activeModel)
+      service.embedQuery('postgres search', activeModel, SCOPE)
     ).resolves.toEqual([0.25, 0.75]);
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
@@ -163,10 +168,57 @@ describe('embedding-service', () => {
     const provider = makeProvider();
     const service = createEmbeddingService({ provider });
 
-    await service.embedQuery('private roadmap');
-    await service.embedQuery('private roadmap');
+    await service.embedQuery('private roadmap', undefined, SCOPE);
+    await service.embedQuery('private roadmap', undefined, SCOPE);
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('bypasses the cache when there is no client scope to partition by', async () => {
+    const provider = makeProvider();
+    const service = createEmbeddingService({ provider });
+
+    await service.embedQuery('private roadmap', activeModel);
+    await service.embedQuery('private roadmap', activeModel);
+
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not share cached query embeddings across clients', async () => {
+    const provider = makeProvider();
+    const stored = new Map<string, string>();
+    const pool = makeCachePool(stored);
+    const service = createEmbeddingService({ provider });
+
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'client-a',
+      pool
+    });
+    await service.flushPendingWrites();
+
+    // A second client must not be able to observe the first client's query as
+    // a cache hit — that timing difference is itself an information leak.
+    const statuses: string[] = [];
+    await service.embedQuery('private roadmap', activeModel, {
+      cacheScope: 'client-b',
+      pool,
+      onCacheStatus: (status) => statuses.push(status)
+    });
+
+    expect(statuses).toEqual(['miss']);
+    expect(provider.embedBatchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('produces a different digest per secret and none for the same text unkeyed', () => {
+    const unkeyed = createQueryEmbeddingCacheKey('private roadmap');
+    const keyed = createQueryEmbeddingCacheKey('private roadmap', 'secret-a');
+    const other = createQueryEmbeddingCacheKey('private roadmap', 'secret-b');
+
+    expect(keyed).not.toEqual(unkeyed);
+    expect(keyed).not.toEqual(other);
+    expect(createQueryEmbeddingCacheKey('private roadmap', 'secret-a')).toEqual(
+      keyed
+    );
   });
 
   it('evicts the least recently used query when the cache is full', async () => {
@@ -176,11 +228,11 @@ describe('embedding-service', () => {
       queryCacheMaxSize: 2
     });
 
-    await service.embedQuery('query one', activeModel);
-    await service.embedQuery('query two', activeModel);
-    await service.embedQuery('query one', activeModel);
-    await service.embedQuery('query three', activeModel);
-    await service.embedQuery('query two', activeModel);
+    await service.embedQuery('query one', activeModel, SCOPE);
+    await service.embedQuery('query two', activeModel, SCOPE);
+    await service.embedQuery('query one', activeModel, SCOPE);
+    await service.embedQuery('query three', activeModel, SCOPE);
+    await service.embedQuery('query two', activeModel, SCOPE);
 
     expect(provider.embedBatchMock).toHaveBeenCalledTimes(4);
   });
@@ -191,7 +243,7 @@ describe('embedding-service', () => {
     const pool = makeCachePool(stored);
 
     const first = createEmbeddingService({ provider });
-    await first.embedQuery('postgres search', activeModel, { pool });
+    await first.embedQuery('postgres search', activeModel, { ...SCOPE, pool });
     await first.flushPendingWrites();
 
     // A second service instance stands in for a restarted process: its
@@ -199,6 +251,7 @@ describe('embedding-service', () => {
     const second = createEmbeddingService({ provider });
     const statuses: string[] = [];
     const result = await second.embedQuery('postgres search', activeModel, {
+      ...SCOPE,
       pool,
       onCacheStatus: (status) => statuses.push(status)
     });
@@ -214,7 +267,7 @@ describe('embedding-service', () => {
     const pool = makeCachePool(stored);
 
     const first = createEmbeddingService({ provider });
-    await first.embedQuery('postgres search', activeModel, { pool });
+    await first.embedQuery('postgres search', activeModel, { ...SCOPE, pool });
     await first.flushPendingWrites();
 
     // Simulate the model row being mutated in place under a stable id.
@@ -225,6 +278,7 @@ describe('embedding-service', () => {
     const second = createEmbeddingService({ provider });
     const statuses: string[] = [];
     await second.embedQuery('postgres search', activeModel, {
+      ...SCOPE,
       pool,
       onCacheStatus: (status) => statuses.push(status)
     });
@@ -242,7 +296,7 @@ describe('embedding-service', () => {
     const service = createEmbeddingService({ provider });
 
     await expect(
-      service.embedQuery('postgres search', activeModel, { pool })
+      service.embedQuery('postgres search', activeModel, { ...SCOPE, pool })
     ).resolves.toEqual([0.25, 0.75]);
   });
 
@@ -252,9 +306,18 @@ describe('embedding-service', () => {
     const statuses: string[] = [];
     const onCacheStatus = (status: string) => statuses.push(status);
 
-    await service.embedQuery('private roadmap', activeModel, { onCacheStatus });
-    await service.embedQuery('private roadmap', activeModel, { onCacheStatus });
-    await service.embedQuery('private roadmap', undefined, { onCacheStatus });
+    await service.embedQuery('private roadmap', activeModel, {
+      ...SCOPE,
+      onCacheStatus
+    });
+    await service.embedQuery('private roadmap', activeModel, {
+      ...SCOPE,
+      onCacheStatus
+    });
+    await service.embedQuery('private roadmap', undefined, {
+      ...SCOPE,
+      onCacheStatus
+    });
 
     expect(statuses).toEqual(['miss', 'memory_hit', 'bypass']);
   });

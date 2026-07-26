@@ -644,6 +644,7 @@ those values outside database backups and browser storage.
 | `EMBEDDING_API_KEY`    | no                   |                                 | Optional bearer token for `EMBEDDING_BASE_URL`.                                                                                 |
 | `EMBEDDING_TIMEOUT_MS` | no                   | `15000`                         | Hard timeout for a single embedding provider call. Bounds how long one stalled request can hold a connection. |
 | `QUERY_EMBEDDING_CACHE_SIZE` | no             | `512`                           | In-process query embeddings held in front of the Postgres-backed cache. |
+| `QUERY_EMBEDDING_CACHE_SECRET` | no           |                                 | Keys the query digest with an HMAC. Without it the digest is an unkeyed sha256, which a reader of the database can dictionary-test to confirm whether a guessed query was run. Set it if you treat query text as more sensitive than entity content; it must live outside the database to mean anything. Changing it invalidates existing cache rows. |
 | `QUERY_EMBEDDING_CACHE_RETENTION_DAYS` | no   | `30`                            | Age at which persisted query embeddings are pruned. |
 
 When Postgram runs in Docker and Ollama runs directly on the Docker host, use `http://host.docker.internal:11434` for `EMBEDDING_BASE_URL`; `localhost` inside the container points at the Postgram container, not the host machine.
@@ -1287,10 +1288,13 @@ npm run test:coverage
 npm run benchmark:search -- --assert  # 5k-entity/6k-chunk latency gate
 ```
 
-The search benchmark reports p50/p95 latency for uncached hybrid search,
-provider-delayed hybrid search, the timed lexical fallback, and repeated-query
-cache hits. It also records `EXPLAIN (ANALYZE, BUFFERS)` summaries for the
-hybrid and lexical SQL paths.
+The search benchmark reports p50/p95 latency for three profiles —
+`cold_unique_queries` (every query pays a provider round trip),
+`memory_cache_hit`, and `database_cache_hit` (in-process cache empty, so only
+the persisted cache can serve it) — along with the number of embedding provider
+calls each profile made and an `EXPLAIN (ANALYZE, BUFFERS)` summary of the
+hybrid SQL. It stubs the embedding provider with a fixed delay, so it measures
+SQL time and cache hit rate; it says nothing about real provider latency.
 
 Targeted suites:
 

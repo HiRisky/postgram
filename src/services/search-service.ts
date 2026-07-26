@@ -409,6 +409,10 @@ export function searchEntities(
         activeModel,
         {
           pool,
+          // Partitions cache entries per client so one client cannot detect
+          // another's queries by timing a hit. An unauthenticated context has
+          // no scope and simply is not cached.
+          ...(auth.clientId ? { cacheScope: auth.clientId } : {}),
           onCacheStatus: (status) => {
             cacheStatus = status;
           }

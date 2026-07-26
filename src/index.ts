@@ -374,7 +374,8 @@ export async function startServer(): Promise<{
     createEmbeddingProvider(providerConfig);
   const embeddingService = createEmbeddingService({
     provider: embeddingProvider,
-    queryCacheMaxSize: runtimeConfig.QUERY_EMBEDDING_CACHE_SIZE
+    queryCacheMaxSize: runtimeConfig.QUERY_EMBEDDING_CACHE_SIZE,
+    queryCacheSecret: runtimeConfig.QUERY_EMBEDDING_CACHE_SECRET
   });
 
   logger.info(

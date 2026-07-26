@@ -151,7 +151,7 @@ describe('searchEntities query embedding', () => {
     expect(embedQuery).toHaveBeenCalledWith(
       'postgres search',
       expect.any(Object),
-      expect.objectContaining({ pool })
+      expect.objectContaining({ pool, cacheScope: searchAuth.clientId })
     );
   });
 

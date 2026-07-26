@@ -34,6 +34,7 @@ const configSchema = z
       emptyToUndefined,
       z.coerce.number().int().positive().default(15000)
     ),
+    QUERY_EMBEDDING_CACHE_SECRET: optionalString,
     QUERY_EMBEDDING_CACHE_SIZE: z.preprocess(
       emptyToUndefined,
       z.coerce.number().int().positive().default(512)

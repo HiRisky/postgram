@@ -580,10 +580,12 @@ npm run benchmark:search -- --assert
 Expected:
 
 - The fixture contains 5,000 entities and 6,000 chunks
-- All four profiles stay under their p95 thresholds
-- The report includes hybrid and lexical `EXPLAIN (ANALYZE, BUFFERS)` summaries
-- REST, MCP, CLI, and UI output clearly distinguish hybrid results from lexical
-  fallback results
+- All three profiles (`cold_unique_queries`, `memory_cache_hit`,
+  `database_cache_hit`) stay under their p95 thresholds
+- `embedding_calls` reports one call per sample for `cold_unique_queries` and
+  zero for both cache-hit profiles — a cache that stopped working fails here
+  even on a machine fast enough to meet the latency thresholds
+- The report includes a hybrid `EXPLAIN (ANALYZE, BUFFERS)` summary
 
 Resource:
 

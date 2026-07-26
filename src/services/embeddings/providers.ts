@@ -1,4 +1,7 @@
-import OpenAI from 'openai';
+import OpenAI, {
+  APIConnectionTimeoutError,
+  APIUserAbortError
+} from 'openai';
 
 import { AppError, ErrorCode } from '../../util/errors.js';
 
@@ -45,6 +48,19 @@ const OLLAMA_DEFAULT_DIMENSIONS = 1024;
 export const DEFAULT_EMBEDDING_TIMEOUT_MS = 15_000;
 export const DEFAULT_EMBEDDING_MAX_RETRIES = 2;
 
+// The SDK's `timeout` is applied per HTTP attempt and a timed-out attempt is
+// itself retried, so `timeout` alone bounds an attempt rather than the
+// operation: measured locally, timeout=200/maxRetries=2 took 1974ms to fail.
+// Every provider call therefore also carries an outer AbortSignal, which is
+// what actually makes EMBEDDING_TIMEOUT_MS mean what its name says.
+//
+// Retries are still worth keeping: a fast transient failure (429, 5xx) fails
+// well inside the budget and leaves room to try again. Only slow failures are
+// cut off, which is precisely the case retrying should not extend.
+function embeddingDeadline(timeoutMs: number): AbortSignal {
+  return AbortSignal.timeout(timeoutMs);
+}
+
 export function resolveEmbeddingDefaults(
   provider: EmbeddingProviderName,
   model?: string,
@@ -64,12 +80,15 @@ export function resolveEmbeddingDefaults(
 
 type OpenAIEmbeddingClient = {
   embeddings: {
-    create: (params: {
-      model: string;
-      input: string[];
-      encoding_format: 'float';
-      dimensions?: number;
-    }) => Promise<{
+    create: (
+      params: {
+        model: string;
+        input: string[];
+        encoding_format: 'float';
+        dimensions?: number;
+      },
+      options?: { signal?: AbortSignal | undefined }
+    ) => Promise<{
       data: Array<{ index: number; embedding: number[] }>;
     }>;
   };
@@ -77,6 +96,27 @@ type OpenAIEmbeddingClient = {
 
 function embeddingError(message: string, details: Record<string, unknown> = {}): AppError {
   return new AppError(ErrorCode.EMBEDDING_FAILED, message, details);
+}
+
+/**
+ * The deadline surfaces differently depending on where it fires. The OpenAI SDK
+ * wraps an aborted signal as APIUserAbortError and an exhausted per-attempt
+ * timeout as APIConnectionTimeoutError; neither sets a useful `name`, so they
+ * are matched by class. A bare fetch instead rejects with a DOMException named
+ * AbortError or TimeoutError.
+ */
+function isAbortError(error: unknown): boolean {
+  if (
+    error instanceof APIUserAbortError ||
+    error instanceof APIConnectionTimeoutError
+  ) {
+    return true;
+  }
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const name = (error as { name?: unknown }).name;
+  return name === 'AbortError' || name === 'TimeoutError';
 }
 
 function assertVectorShape(
@@ -112,17 +152,22 @@ export function createOpenAIEmbeddingProvider(
       return [];
     }
 
+    const timeoutMs = config.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS;
+
     try {
       // Pass `dimensions` to OpenAI when the operator has chosen a non-default
       // size. text-embedding-3-small/large accept this parameter and truncate
       // via Matryoshka; older models (ada-002) will reject it at the API.
       const nonDefaultDimensions = config.dimensions !== OPENAI_DEFAULT_DIMENSIONS;
-      const response = await client.embeddings.create({
-        model: config.model,
-        input: texts,
-        encoding_format: 'float',
-        ...(nonDefaultDimensions ? { dimensions: config.dimensions } : {})
-      });
+      const response = await client.embeddings.create(
+        {
+          model: config.model,
+          input: texts,
+          encoding_format: 'float',
+          ...(nonDefaultDimensions ? { dimensions: config.dimensions } : {})
+        },
+        { signal: embeddingDeadline(timeoutMs) }
+      );
 
       const ordered = response.data
         .slice()
@@ -146,6 +191,12 @@ export function createOpenAIEmbeddingProvider(
     } catch (error) {
       if (error instanceof AppError) {
         throw error;
+      }
+      if (isAbortError(error)) {
+        throw embeddingError(
+          `OpenAI embedding call timed out after ${timeoutMs}ms`,
+          { provider: 'openai', model: config.model, timeoutMs }
+        );
       }
       const message =
         error instanceof Error ? error.message : 'OpenAI embedding call failed';
