@@ -10,14 +10,30 @@ function baseEnv(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 describe('config', () => {
-  it('defaults and validates the search embedding latency budget', () => {
-    expect(loadConfig(baseEnv()).SEARCH_EMBEDDING_BUDGET_MS).toBe(350);
+  it('defaults and validates the embedding provider timeout', () => {
+    expect(loadConfig(baseEnv()).EMBEDDING_TIMEOUT_MS).toBe(15000);
     expect(
-      loadConfig(baseEnv({ SEARCH_EMBEDDING_BUDGET_MS: '725' }))
-        .SEARCH_EMBEDDING_BUDGET_MS
-    ).toBe(725);
+      loadConfig(baseEnv({ EMBEDDING_TIMEOUT_MS: '5000' })).EMBEDDING_TIMEOUT_MS
+    ).toBe(5000);
+    expect(() => loadConfig(baseEnv({ EMBEDDING_TIMEOUT_MS: '0' }))).toThrow();
+  });
+
+  it('defaults and validates the query embedding cache settings', () => {
+    const defaults = loadConfig(baseEnv());
+    expect(defaults.QUERY_EMBEDDING_CACHE_SIZE).toBe(512);
+    expect(defaults.QUERY_EMBEDDING_CACHE_RETENTION_DAYS).toBe(30);
+
+    const overridden = loadConfig(
+      baseEnv({
+        QUERY_EMBEDDING_CACHE_SIZE: '64',
+        QUERY_EMBEDDING_CACHE_RETENTION_DAYS: '7'
+      })
+    );
+    expect(overridden.QUERY_EMBEDDING_CACHE_SIZE).toBe(64);
+    expect(overridden.QUERY_EMBEDDING_CACHE_RETENTION_DAYS).toBe(7);
+
     expect(() =>
-      loadConfig(baseEnv({ SEARCH_EMBEDDING_BUDGET_MS: '0' }))
+      loadConfig(baseEnv({ QUERY_EMBEDDING_CACHE_SIZE: '0' }))
     ).toThrow();
   });
 

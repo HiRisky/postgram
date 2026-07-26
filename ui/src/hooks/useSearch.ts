@@ -5,9 +5,6 @@ import type { SearchResult } from '../lib/types.ts';
 export function useSearch(api: ApiClient) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [fallbackReason, setFallbackReason] = useState<
-    'embedding_timeout' | 'embedding_error' | null
-  >(null);
   const [loading, setLoading] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -16,7 +13,6 @@ export function useSearch(api: ApiClient) {
     if (timerRef.current) clearTimeout(timerRef.current);
     if (!q.trim()) {
       setResults([]);
-      setFallbackReason(null);
       return;
     }
     timerRef.current = setTimeout(() => {
@@ -25,10 +21,8 @@ export function useSearch(api: ApiClient) {
         try {
           const res = await api.searchEntities({ query: q, limit: 20 });
           setResults(res.results);
-          setFallbackReason(res.fallback_reason ?? null);
         } catch {
           setResults([]);
-          setFallbackReason(null);
         } finally {
           setLoading(false);
         }
@@ -39,8 +33,7 @@ export function useSearch(api: ApiClient) {
   const clear = useCallback(() => {
     setQuery('');
     setResults([]);
-    setFallbackReason(null);
   }, []);
 
-  return { query, results, fallbackReason, loading, search, clear };
+  return { query, results, loading, search, clear };
 }

@@ -20,6 +20,8 @@ export type EmbeddingProviderConfig =
       model: string;
       dimensions: number;
       apiKey: string;
+      timeoutMs?: number | undefined;
+      maxRetries?: number | undefined;
     }
   | {
       provider: 'ollama';
@@ -27,6 +29,7 @@ export type EmbeddingProviderConfig =
       dimensions: number;
       baseUrl: string;
       apiKey?: string | undefined;
+      timeoutMs?: number | undefined;
       fetchImpl?: ProviderFetch | undefined;
     };
 
@@ -34,6 +37,13 @@ const OPENAI_DEFAULT_MODEL = 'text-embedding-3-small';
 const OPENAI_DEFAULT_DIMENSIONS = 1536;
 const OLLAMA_DEFAULT_MODEL = 'bge-m3';
 const OLLAMA_DEFAULT_DIMENSIONS = 1024;
+
+// The OpenAI SDK defaults to a 10 minute timeout and 2 retries, which means a
+// single stalled embedding call can pin a request (and a database connection
+// upstream of it) for far longer than any caller is willing to wait. Embedding
+// a short query is a sub-second operation; bound it accordingly.
+export const DEFAULT_EMBEDDING_TIMEOUT_MS = 15_000;
+export const DEFAULT_EMBEDDING_MAX_RETRIES = 2;
 
 export function resolveEmbeddingDefaults(
   provider: EmbeddingProviderName,
@@ -89,7 +99,13 @@ export function createOpenAIEmbeddingProvider(
   config: Extract<EmbeddingProviderConfig, { provider: 'openai' }>,
   clientOverride?: OpenAIEmbeddingClient
 ): EmbeddingProvider {
-  const client = clientOverride ?? new OpenAI({ apiKey: config.apiKey });
+  const client =
+    clientOverride ??
+    new OpenAI({
+      apiKey: config.apiKey,
+      timeout: config.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS,
+      maxRetries: config.maxRetries ?? DEFAULT_EMBEDDING_MAX_RETRIES
+    });
 
   async function embedBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) {
@@ -166,6 +182,24 @@ export function createOllamaEmbeddingProvider(
   const baseUrl = config.baseUrl.replace(/\/+$/, '');
 
   async function callOllama(prompt: string): Promise<number[]> {
+    // The timer spans the body read as well as the headers: fetch resolves as
+    // soon as headers arrive, so clearing it earlier would leave a stalled
+    // response body unbounded.
+    const timeoutMs = config.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await callOllamaWithSignal(prompt, controller, timeoutMs);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function callOllamaWithSignal(
+    prompt: string,
+    controller: AbortController,
+    timeoutMs: number
+  ): Promise<number[]> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
     };
@@ -178,9 +212,16 @@ export function createOllamaEmbeddingProvider(
       response = await (config.fetchImpl ?? fetch)(`${baseUrl}/api/embeddings`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: config.model, prompt })
+        body: JSON.stringify({ model: config.model, prompt }),
+        signal: controller.signal
       });
     } catch (error) {
+      if (controller.signal.aborted) {
+        throw embeddingError(
+          `Ollama embedding call timed out after ${timeoutMs}ms`,
+          { provider: 'ollama', model: config.model, baseUrl, timeoutMs }
+        );
+      }
       const message =
         error instanceof Error ? error.message : 'Ollama embedding call failed';
       throw embeddingError(`Ollama provider unreachable: ${message}`, {
@@ -204,7 +245,24 @@ export function createOllamaEmbeddingProvider(
       );
     }
 
-    const body = (await response.json()) as { embedding?: number[] };
+    let body: { embedding?: number[] };
+    try {
+      body = (await response.json()) as { embedding?: number[] };
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw embeddingError(
+          `Ollama embedding call timed out after ${timeoutMs}ms`,
+          { provider: 'ollama', model: config.model, baseUrl, timeoutMs }
+        );
+      }
+      const message =
+        error instanceof Error ? error.message : 'Invalid JSON from Ollama';
+      throw embeddingError(`Ollama returned an unreadable response: ${message}`, {
+        provider: 'ollama',
+        model: config.model,
+        baseUrl
+      });
+    }
     if (!body.embedding) {
       throw embeddingError('Ollama response missing embedding field', {
         provider: 'ollama',

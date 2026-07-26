@@ -294,7 +294,6 @@ function createSessionServer(
   auth: AuthContext,
   options: {
     embeddingService?: EmbeddingService | undefined;
-    searchEmbeddingBudgetMs?: number | undefined;
     logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
   } = {}
@@ -559,15 +558,10 @@ function createSessionServer(
           },
           {
             embeddingService: options.embeddingService,
-            embeddingBudgetMs: options.searchEmbeddingBudgetMs,
             logger: options.logger
           }
         ),
         (value) => ({
-          search_mode: value.searchMode,
-          ...(value.fallbackReason
-            ? { fallback_reason: value.fallbackReason }
-            : {}),
           results: value.results.map((entry) => ({
             entity: toStoredEntity(entry.entity),
             chunk_content: entry.chunkContent,
@@ -968,7 +962,6 @@ export function registerMcpRoutes(
   pool: Pool,
   options: {
     embeddingService?: EmbeddingService | undefined;
-    searchEmbeddingBudgetMs?: number | undefined;
     logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
     resourceMetadataUrl?: string | undefined;

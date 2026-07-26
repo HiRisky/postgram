@@ -270,7 +270,6 @@ export function registerRestRoutes(
   pool: Pool,
   options: {
     embeddingService?: EmbeddingService | undefined;
-    searchEmbeddingBudgetMs?: number | undefined;
     logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
     extractionEnabled?: boolean | undefined;
   } = {}
@@ -539,7 +538,6 @@ export function registerRestRoutes(
       },
       {
         embeddingService: options.embeddingService,
-        embeddingBudgetMs: options.searchEmbeddingBudgetMs,
         logger: options.logger
       }
     );
@@ -549,10 +547,6 @@ export function registerRestRoutes(
     }
 
     return c.json({
-      search_mode: result.value.searchMode,
-      ...(result.value.fallbackReason
-        ? { fallback_reason: result.value.fallbackReason }
-        : {}),
       results: result.value.results.map((entry) => ({
         entity: toStoredEntity(entry.entity),
         chunk_content: entry.chunkContent,

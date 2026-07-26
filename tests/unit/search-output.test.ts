@@ -28,7 +28,6 @@ const fullEntity = {
 };
 
 const fullSearchResponse = {
-  search_mode: 'hybrid' as const,
   results: [
     {
       entity: fullEntity,
@@ -178,7 +177,6 @@ describe('search output formatting', () => {
 
   it('compacts search responses for agent-token-efficient defaults', () => {
     expect(compactSearchResponse(fullSearchResponse)).toEqual({
-      search_mode: 'hybrid',
       results: [
         {
           id: '01234567-89ab-cdef-0123-456789abcdef',
@@ -216,7 +214,6 @@ describe('search output formatting', () => {
     expect(toon).toContain(
       'results[1]{id,type,score,content,chunk,tags,edges,related}:'
     );
-    expect(toon).toContain('search_mode:hybrid');
     expect(toon).toContain('01234567-89ab-cdef-0123-456789abcdef,memory,0.88');
     expect(toon).toContain('tokens');
     expect(toon).toContain('3 edges: mentioned_in=2|depends_on=1');

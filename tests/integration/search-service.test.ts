@@ -641,7 +641,7 @@ describe('search-service', () => {
     expect(results.some((r) => r.entityId === entityId)).toBe(true);
   }, 120_000);
 
-  it('returns lexical fallback results when query embedding fails', async () => {
+  it('fails the search when query embedding fails', async () => {
     if (!database) {
       throw new Error('test database not initialized');
     }
@@ -672,15 +672,60 @@ describe('search-service', () => {
       { embeddingService: failingEmbeddingService }
     );
 
-    expect(result.isOk()).toBe(true);
-    expect(result._unsafeUnwrap()).toMatchObject({
-      searchMode: 'lexical_fallback',
-      fallbackReason: 'embedding_error'
+    // Keyword results are scored on a different scale to hybrid results, and
+    // BM25 normalisation means the best keyword match always scores near 1.0
+    // however irrelevant it is. Returning those under the caller's semantic
+    // threshold would be worse than returning nothing.
+    expect(result.isErr()).toBe(true);
+  }, 120_000);
+
+  it('serves a repeated query embedding from Postgres across service instances', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    await storeEntity(database.pool, makeAuthContext(), {
+      type: 'memory',
+      content: 'redis cluster failover runbook',
+      tags: ['infra']
     });
-    expect(
-      result
-        ._unsafeUnwrap()
-        .results.some((entry) => entry.entity.content?.includes('kubernetes'))
-    ).toBe(true);
+    await createEnrichmentWorker({
+      pool: database.pool,
+      embeddingService: createEmbeddingService()
+    }).runOnce();
+
+    let embedCalls = 0;
+    const countingEmbedQuery = (): Promise<number[]> => {
+      embedCalls += 1;
+      return Promise.resolve(new Array<number>(1536).fill(0.01));
+    };
+
+    const first = createEmbeddingService({ embedQuery: countingEmbedQuery });
+    await searchEntities(
+      database.pool,
+      makeAuthContext(),
+      { query: 'redis failover', threshold: 0 },
+      { embeddingService: first }
+    );
+    await first.flushPendingWrites();
+    expect(embedCalls).toBe(1);
+
+    // A second instance stands in for a restarted process: its in-memory cache
+    // is empty, so avoiding a provider call proves the row was persisted.
+    const second = createEmbeddingService({ embedQuery: countingEmbedQuery });
+    const result = await searchEntities(
+      database.pool,
+      makeAuthContext(),
+      { query: 'redis failover', threshold: 0 },
+      { embeddingService: second }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(embedCalls).toBe(1);
+
+    const cached = await database.pool.query<{ count: number }>(
+      'SELECT count(*)::int AS count FROM query_embedding_cache'
+    );
+    expect(cached.rows[0]?.count).toBe(1);
   }, 120_000);
 });

@@ -37,8 +37,15 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Run search latency gate
-        run: npm run benchmark:search -- --assert | tee search-latency.json
+        # pipefail matters: without it the pipeline exits with tee's status and
+        # a failed assertion would silently pass the job.
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run benchmark:search -- --assert | tee search-latency.json
       - uses: actions/upload-artifact@v4
+        # Upload on failure too — the numbers are what explain a failed gate.
+        if: always()
         with:
           name: search-latency
           path: search-latency.json

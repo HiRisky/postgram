@@ -17,6 +17,7 @@ import { ownerSqlCondition } from './owner-filter.js';
 import {
   createEmbeddingService,
   type EmbeddingService,
+  type QueryEmbeddingCacheStatus,
   vectorToSql
 } from './embedding-service.js';
 import type { MemoryRole } from './memory-role-service.js';
@@ -84,17 +85,11 @@ type SearchInput = {
 type SearchOptions = {
   embeddingService?: EmbeddingService | undefined;
   now?: (() => Date) | undefined;
-  embeddingBudgetMs?: number | undefined;
   logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
 };
 
-export type SearchMode = 'hybrid' | 'lexical_fallback';
-export type SearchFallbackReason = 'embedding_timeout' | 'embedding_error';
-
 export type SearchResponse = {
   results: SearchResult[];
-  searchMode: SearchMode;
-  fallbackReason?: SearchFallbackReason | undefined;
 };
 
 function toAppError(error: unknown, fallbackMessage: string): AppError {
@@ -148,35 +143,6 @@ export function scopedMemoryVisibilitySql(
   )`;
 }
 
-export function applyRecencyBoost({
-  similarity,
-  ageDays,
-  recencyWeight,
-  halfLifeDays
-}: {
-  similarity: number;
-  ageDays: number;
-  recencyWeight: number;
-  halfLifeDays: number;
-}): number {
-  return similarity * (1 + recencyWeight * Math.exp(-ageDays / halfLifeDays));
-}
-
-export function deduplicateResults<T extends { entityId: string; score: number }>(
-  results: T[]
-): T[] {
-  const bestByEntity = new Map<string, T>();
-
-  for (const result of results) {
-    const existing = bestByEntity.get(result.entityId);
-    if (!existing || result.score > existing.score) {
-      bestByEntity.set(result.entityId, result);
-    }
-  }
-
-  return Array.from(bestByEntity.values()).sort((left, right) => right.score - left.score);
-}
-
 export function buildSearchEdgeSummaries(
   rows: SearchEdgeSummaryRow[]
 ): Map<string, SearchEdgeSummary> {
@@ -207,30 +173,13 @@ export function buildSearchEdgeSummaries(
   return summaries;
 }
 
-const VECTOR_WEIGHT = 0.6;
-const BM25_WEIGHT = 0.4;
-
-export function normalizeBm25Scores<T extends { bm25: number }>(
-  results: T[]
-): T[] {
-  const maxBm25 = Math.max(...results.map((r) => r.bm25));
-
-  if (maxBm25 === 0) {
-    return results;
-  }
-
-  return results.map((r) => ({
-    ...r,
-    bm25: r.bm25 / maxBm25
-  }));
-}
-
-export function blendScores(
-  vectorScore: number,
-  normalizedBm25Score: number
-): number {
-  return VECTOR_WEIGHT * vectorScore + BM25_WEIGHT * normalizedBm25Score;
-}
+// Ranking weights. These are interpolated into the SQL below rather than
+// applied in JS so that thresholding, deduplication and the final LIMIT all
+// happen inside Postgres — only the rows that survive get their content
+// hydrated and shipped across the wire.
+export const VECTOR_WEIGHT = 0.6;
+export const BM25_WEIGHT = 0.4;
+export const RECENCY_HALF_LIFE_DAYS = 30;
 
 type SearchContext = {
   threshold: number;
@@ -242,7 +191,6 @@ type SearchContext = {
 // Bound the vector candidate set before SQL-side BM25 and recency reranking.
 // This keeps ranking work and intermediate tuples predictable as the corpus grows.
 const CANDIDATE_CAP = 500;
-const DEFAULT_EMBEDDING_BUDGET_MS = 350;
 
 function mapSearchRows(rows: SearchRow[]): SearchResult[] {
   return rows.map((row) => {
@@ -308,12 +256,12 @@ async function runHybridSearch(
         SELECT
           normalized.*,
           (
-            0.6 * similarity + 0.4 * normalized_bm25
+            ${VECTOR_WEIGHT} * similarity + ${BM25_WEIGHT} * normalized_bm25
           ) * (
             1 + $13::double precision * EXP(
               -EXTRACT(EPOCH FROM ($14::timestamptz - created_at))
               / 86400.0
-              / 30.0
+              / ${RECENCY_HALF_LIFE_DAYS}.0
             )
           ) AS score
         FROM normalized
@@ -368,111 +316,6 @@ async function runHybridSearch(
   return {
     results: mapSearchRows(rows.rows)
   };
-}
-
-async function runLexicalSearch(
-  pool: Pool,
-  auth: AuthContext,
-  input: SearchInput,
-  ctx: SearchContext & { queryText: string }
-): Promise<{ results: SearchResult[] }> {
-  const candidateLimit = Math.min(ctx.limit * 20, CANDIDATE_CAP);
-  const rows = await pool.query<SearchRow>(
-    `
-      WITH search_query AS (
-        SELECT plainto_tsquery('simple', $1) AS value
-      ),
-      candidates AS MATERIALIZED (
-        SELECT
-          e.id AS entity_id,
-          e.created_at,
-          ts_rank(e.search_tsvector, search_query.value) AS bm25
-        FROM entities e
-        CROSS JOIN search_query
-        WHERE ($9::boolean = true OR e.status IS DISTINCT FROM 'archived')
-          AND ($2::text IS NULL OR e.type = $2)
-          AND ($3::text[] IS NULL OR e.tags @> $3)
-          AND ($4::text[] IS NULL OR e.type = ANY($4))
-          AND e.visibility = ANY($5)
-          AND ($6::text IS NULL OR e.visibility = $6)
-          AND ${ownerSqlCondition('e.owner', '$7')}
-          AND (
-            $10::text IS NULL
-            OR (
-              e.type = 'memory'
-              AND COALESCE(e.metadata->>'memory_role', 'durable_memory') = $10
-            )
-          )
-          AND ${scopedMemoryVisibilitySql('e.metadata', '$11')}
-          AND e.search_tsvector @@ search_query.value
-          AND EXISTS (SELECT 1 FROM chunks c WHERE c.entity_id = e.id)
-        ORDER BY bm25 DESC, e.id
-        LIMIT $8
-      ),
-      normalized AS (
-        SELECT
-          candidates.*,
-          CASE
-            WHEN MAX(bm25) OVER () = 0 THEN bm25
-            ELSE bm25 / MAX(bm25) OVER ()
-          END AS normalized_bm25
-        FROM candidates
-      ),
-      scored AS (
-        SELECT
-          normalized.*,
-          normalized_bm25 * (
-            1 + $12::double precision * EXP(
-              -EXTRACT(EPOCH FROM ($13::timestamptz - created_at))
-              / 86400.0
-              / 30.0
-            )
-          ) AS score
-        FROM normalized
-      ),
-      top_results AS MATERIALIZED (
-        SELECT *
-        FROM scored
-        WHERE score >= $14
-        ORDER BY score DESC, entity_id
-        LIMIT $15
-      )
-      SELECT
-        e.*,
-        first_chunk.content AS chunk_content,
-        0::double precision AS similarity,
-        top_results.score
-      FROM top_results
-      JOIN entities e ON e.id = top_results.entity_id
-      JOIN LATERAL (
-        SELECT c.content
-        FROM chunks c
-        WHERE c.entity_id = e.id
-        ORDER BY c.chunk_index, c.id
-        LIMIT 1
-      ) first_chunk ON true
-      ORDER BY top_results.score DESC, top_results.entity_id
-    `,
-    [
-      ctx.queryText,
-      input.type ?? null,
-      input.tags?.length ? input.tags : null,
-      auth.allowedTypes,
-      auth.allowedVisibility,
-      input.visibility ?? null,
-      input.owner ?? null,
-      candidateLimit,
-      input.includeArchived ?? false,
-      input.memoryRole ?? null,
-      auth.clientId,
-      ctx.recencyWeight,
-      ctx.now,
-      ctx.threshold,
-      ctx.limit
-    ]
-  );
-
-  return { results: mapSearchRows(rows.rows) };
 }
 
 async function fetchSearchEdgeSummaries(
@@ -543,10 +386,8 @@ export function searchEntities(
       const recencyWeight = input.recencyWeight ?? 0.1;
       const limit = input.limit ?? 10;
       const now = options.now?.() ?? new Date();
-      const embeddingBudgetMs =
-        options.embeddingBudgetMs ?? DEFAULT_EMBEDDING_BUDGET_MS;
       const timings: Record<string, number> = {};
-      let cacheStatus: 'bypass' | 'hit' | 'miss' = 'bypass';
+      let cacheStatus: QueryEmbeddingCacheStatus = 'bypass';
 
       const embeddingService =
         options.embeddingService ?? createEmbeddingService();
@@ -558,93 +399,29 @@ export function searchEntities(
         now
       };
 
-      const lexicalStartedAt = Date.now();
-      const lexicalTask = runLexicalSearch(
-        pool,
-        auth,
-        input,
-        searchContext
-      ).then(
-        (value) => {
-          timings['lexicalSqlMs'] = Date.now() - lexicalStartedAt;
-          return { ok: true as const, value };
-        },
-        (error: unknown) => {
-          timings['lexicalSqlMs'] = Date.now() - lexicalStartedAt;
-          return { ok: false as const, error };
+      const modelStartedAt = Date.now();
+      const activeModel = await embeddingService.getActiveModelForQuery(pool);
+      timings['activeModelMs'] = Date.now() - modelStartedAt;
+
+      const embeddingStartedAt = Date.now();
+      const queryEmbedding = await embeddingService.embedQuery(
+        query,
+        activeModel,
+        {
+          pool,
+          onCacheStatus: (status) => {
+            cacheStatus = status;
+          }
         }
       );
+      timings['embeddingMs'] = Date.now() - embeddingStartedAt;
 
-      const embeddingTask = (async () => {
-        const modelStartedAt = Date.now();
-        const activeModel = await embeddingService.getActiveModel(pool);
-        timings['activeModelMs'] = Date.now() - modelStartedAt;
-        const embeddingStartedAt = Date.now();
-        const queryEmbedding = await embeddingService.embedQuery(
-          query,
-          activeModel,
-          {
-            ...(auth.apiKeyId ? { cacheScope: auth.apiKeyId } : {}),
-            onCacheStatus: (status) => {
-              cacheStatus = status;
-            }
-          }
-        );
-        timings['embeddingMs'] = Date.now() - embeddingStartedAt;
-        return queryEmbedding;
-      })();
-
-      type EmbeddingOutcome =
-        | { kind: 'ready'; queryEmbedding: number[] }
-        | { kind: 'error' }
-        | { kind: 'timeout' };
-
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      const timeoutTask = new Promise<EmbeddingOutcome>((resolve) => {
-        timeoutHandle = setTimeout(
-          () => resolve({ kind: 'timeout' }),
-          embeddingBudgetMs
-        );
-        timeoutHandle.unref?.();
+      const hybridStartedAt = Date.now();
+      const results = await runHybridSearch(pool, auth, input, {
+        ...searchContext,
+        queryEmbedding
       });
-      const embeddingOutcome = await Promise.race([
-        embeddingTask.then(
-          (queryEmbedding): EmbeddingOutcome => ({
-            kind: 'ready',
-            queryEmbedding
-          }),
-          (): EmbeddingOutcome => ({ kind: 'error' })
-        ),
-        timeoutTask
-      ]);
-      if (embeddingOutcome.kind !== 'timeout' && timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-
-      let results: { results: SearchResult[] };
-      let searchMode: SearchMode;
-      let fallbackReason: SearchFallbackReason | undefined;
-
-      if (embeddingOutcome.kind === 'ready') {
-        const hybridStartedAt = Date.now();
-        results = await runHybridSearch(pool, auth, input, {
-          ...searchContext,
-          queryEmbedding: embeddingOutcome.queryEmbedding
-        });
-        timings['hybridSqlMs'] = Date.now() - hybridStartedAt;
-        searchMode = 'hybrid';
-      } else {
-        const lexicalOutcome = await lexicalTask;
-        if (!lexicalOutcome.ok) {
-          throw lexicalOutcome.error;
-        }
-        results = lexicalOutcome.value;
-        searchMode = 'lexical_fallback';
-        fallbackReason =
-          embeddingOutcome.kind === 'timeout'
-            ? 'embedding_timeout'
-            : 'embedding_error';
-      }
+      timings['hybridSqlMs'] = Date.now() - hybridStartedAt;
 
       const edgeStartedAt = Date.now();
       const resultEntityIds = results.results.map((r) => r.entityId);
@@ -745,25 +522,17 @@ export function searchEntities(
 
       timings['edgeMs'] = Date.now() - edgeStartedAt;
       timings['totalMs'] = Date.now() - startedAt;
-      const logContext = {
-        event: 'search.completed',
-        searchMode,
-        ...(fallbackReason ? { fallbackReason } : {}),
-        cacheStatus,
-        resultCount: results.results.length,
-        timings
-      };
-      if (fallbackReason) {
-        options.logger?.warn(logContext, 'search used lexical fallback');
-      } else {
-        options.logger?.debug(logContext, 'search completed');
-      }
+      options.logger?.debug(
+        {
+          event: 'search.completed',
+          cacheStatus,
+          resultCount: results.results.length,
+          timings
+        },
+        'search completed'
+      );
 
-      return {
-        results: results.results,
-        searchMode,
-        ...(fallbackReason ? { fallbackReason } : {})
-      };
+      return { results: results.results };
     })(),
     (error) => toAppError(error, 'Failed to search entities')
   );

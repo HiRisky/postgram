@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import type { Pool } from 'pg';
 
@@ -6,8 +6,8 @@ import { AppError, ErrorCode } from '../util/errors.js';
 import type { EmbeddingProvider } from './embeddings/providers.js';
 
 const DEFAULT_DIMENSIONS = 1536;
-const QUERY_EMBEDDING_CACHE_SIZE = 256;
-const QUERY_EMBEDDING_CACHE_TTL_MS = 5 * 60 * 1000;
+const QUERY_EMBEDDING_CACHE_SIZE = 512;
+const ACTIVE_MODEL_TTL_MS = 60 * 1000;
 
 type EmbeddingMode = 'deterministic' | 'provider';
 
@@ -43,38 +43,39 @@ type EmbeddingServiceOptions = {
     | ((text: string, model?: ActiveEmbeddingModel) => Promise<number[]>)
     | undefined;
   queryCacheMaxSize?: number | undefined;
-  queryCacheSecret?: string | Buffer | undefined;
-  queryCacheTtlMs?: number | undefined;
+  activeModelTtlMs?: number | undefined;
   now?: (() => number) | undefined;
 };
 
-export type QueryEmbeddingCacheStatus = 'bypass' | 'hit' | 'miss';
+export type QueryEmbeddingCacheStatus =
+  | 'bypass'
+  | 'memory_hit'
+  | 'database_hit'
+  | 'miss';
 
 export type QueryEmbeddingOptions = {
-  cacheScope?: string | undefined;
+  /**
+   * When supplied, query embeddings are read from and written to the
+   * `query_embedding_cache` table so the cache survives restarts and is shared
+   * across processes. Without it only the in-process cache is consulted.
+   */
+  pool?: Pool | undefined;
   onCacheStatus?: ((status: QueryEmbeddingCacheStatus) => void) | undefined;
 };
 
 export type EmbeddingService = ReturnType<typeof createEmbeddingService>;
 
-export function createQueryEmbeddingCacheKey(
-  secret: string | Buffer,
-  cacheScope: string,
-  model: ActiveEmbeddingModel,
-  text: string
-): string {
-  return createHmac('sha256', secret)
-    .update(
-      JSON.stringify([
-        cacheScope,
-        model.id,
-        model.provider,
-        model.name,
-        model.dimensions,
-        text
-      ])
-    )
-    .digest('hex');
+/**
+ * Keys cache entries by a one-way digest of the query text so the cache never
+ * retains plaintext queries — neither in memory nor in Postgres.
+ *
+ * This is a plain digest rather than a keyed HMAC on purpose: the persisted
+ * cache has to be readable by future processes, and a per-process random key
+ * could never match a stored row. Reversing a digest requires read access to
+ * the table, at which point the attacker already has the entities themselves.
+ */
+export function createQueryEmbeddingCacheKey(text: string): Buffer {
+  return createHash('sha256').update(text, 'utf8').digest();
 }
 
 function tokenize(text: string): string[] {
@@ -141,6 +142,56 @@ export function vectorToSql(vector: number[]): string {
   return `[${vector.join(',')}]`;
 }
 
+/**
+ * pgvector columns come back from node-postgres as their text representation
+ * (`[0.1,0.2,...]`). Returns null for anything that does not parse cleanly so a
+ * corrupt row degrades to a cache miss rather than poisoning search results.
+ */
+export function sqlToVector(value: unknown): number[] | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+    return null;
+  }
+
+  const body = trimmed.slice(1, -1);
+  if (body.length === 0) {
+    return null;
+  }
+
+  const parsed: number[] = [];
+  for (const part of body.split(',')) {
+    const component = Number(part);
+    if (!Number.isFinite(component)) {
+      return null;
+    }
+    parsed.push(component);
+  }
+
+  return parsed;
+}
+
+/**
+ * Deletes cache entries older than `maxAgeDays`. Age-based rather than
+ * usage-based eviction is deliberate: tracking last-used timestamps would turn
+ * every cache read into a write. Re-embedding a still-hot query once per
+ * retention window is far cheaper than that.
+ */
+export async function pruneQueryEmbeddingCache(
+  pool: Pool,
+  maxAgeDays: number
+): Promise<number> {
+  const result = await pool.query(
+    `DELETE FROM query_embedding_cache
+     WHERE created_at < now() - ($1::integer * interval '1 day')`,
+    [maxAgeDays]
+  );
+  return result.rowCount ?? 0;
+}
+
 export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
   const mode = options.mode ?? resolveDefaultMode(options);
 
@@ -185,65 +236,144 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
       return vector;
     });
 
-  const queryEmbeddingCache = new Map<
-    string,
-    { embedding: Promise<number[]>; expiresAt: number }
-  >();
-  const queryCacheSecret = options.queryCacheSecret ?? randomBytes(32);
-  const queryCacheTtlMs =
-    options.queryCacheTtlMs ?? QUERY_EMBEDDING_CACHE_TTL_MS;
+  // L1: resolved embeddings, insertion-ordered for LRU eviction. There is no
+  // TTL — an embedding is a pure function of (model, text), so an entry can
+  // only be evicted for space, never for staleness.
+  const memoryCache = new Map<string, number[]>();
+  // Coalesces concurrent requests for the same query onto one provider call.
+  const inFlight = new Map<string, Promise<number[]>>();
+  const pendingWrites = new Set<Promise<void>>();
   const queryCacheMaxSize =
     options.queryCacheMaxSize ?? QUERY_EMBEDDING_CACHE_SIZE;
+  const activeModelTtlMs = options.activeModelTtlMs ?? ACTIVE_MODEL_TTL_MS;
   const now = options.now ?? Date.now;
+
+  let activeModelCache: { model: ActiveEmbeddingModel; expiresAt: number } | null =
+    null;
+
+  function rememberInMemory(cacheKey: string, embedding: number[]): void {
+    memoryCache.delete(cacheKey);
+    memoryCache.set(cacheKey, embedding);
+
+    while (memoryCache.size > queryCacheMaxSize) {
+      const oldestKey = memoryCache.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      memoryCache.delete(oldestKey);
+    }
+  }
+
+  async function readFromDatabase(
+    pool: Pool,
+    model: ActiveEmbeddingModel,
+    queryHash: Buffer
+  ): Promise<number[] | null> {
+    const result = await pool.query<{ embedding: unknown }>(
+      `SELECT embedding
+       FROM query_embedding_cache
+       WHERE model_id = $1 AND query_hash = $2`,
+      [model.id, queryHash]
+    );
+
+    const embedding = sqlToVector(result.rows[0]?.embedding);
+    if (!embedding) {
+      return null;
+    }
+
+    // Guard against a model row being mutated in place under a stable id.
+    if (embedding.length !== model.dimensions) {
+      return null;
+    }
+
+    return embedding;
+  }
+
+  function writeToDatabase(
+    pool: Pool,
+    model: ActiveEmbeddingModel,
+    queryHash: Buffer,
+    embedding: number[]
+  ): void {
+    // Deliberately not awaited by the caller: the row is a pure optimisation,
+    // and on a contended host waiting for the INSERT would add the very
+    // latency this cache exists to remove. Tracked so tests and shutdown can
+    // drain it.
+    const write = pool
+      .query(
+        `INSERT INTO query_embedding_cache (model_id, query_hash, embedding)
+         VALUES ($1, $2, $3::vector)
+         ON CONFLICT (model_id, query_hash) DO NOTHING`,
+        [model.id, queryHash, vectorToSql(embedding)]
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      )
+      .finally(() => {
+        pendingWrites.delete(write);
+      });
+    pendingWrites.add(write);
+  }
 
   function embedCachedQuery(
     text: string,
     model?: ActiveEmbeddingModel,
     queryOptions: QueryEmbeddingOptions = {}
   ): Promise<number[]> {
-    if (!model || !queryOptions.cacheScope) {
+    if (!model) {
       queryOptions.onCacheStatus?.('bypass');
       return embedQueryImpl(text, model);
     }
 
-    const cacheKey = createQueryEmbeddingCacheKey(
-      queryCacheSecret,
-      queryOptions.cacheScope,
-      model,
-      text
-    );
-    const cached = queryEmbeddingCache.get(cacheKey);
-    if (cached && cached.expiresAt > now()) {
-      queryEmbeddingCache.delete(cacheKey);
-      queryEmbeddingCache.set(cacheKey, cached);
-      queryOptions.onCacheStatus?.('hit');
-      return cached.embedding;
-    }
+    const queryHash = createQueryEmbeddingCacheKey(text);
+    const cacheKey = `${model.id}:${queryHash.toString('hex')}`;
+
+    const cached = memoryCache.get(cacheKey);
     if (cached) {
-      queryEmbeddingCache.delete(cacheKey);
+      rememberInMemory(cacheKey, cached);
+      queryOptions.onCacheStatus?.('memory_hit');
+      return Promise.resolve(cached);
     }
 
-    const embedding = embedQueryImpl(text, model);
-    queryEmbeddingCache.set(cacheKey, {
-      embedding,
-      expiresAt: now() + queryCacheTtlMs
-    });
-    queryOptions.onCacheStatus?.('miss');
-
-    if (queryEmbeddingCache.size > queryCacheMaxSize) {
-      const oldestKey = queryEmbeddingCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        queryEmbeddingCache.delete(oldestKey);
-      }
+    const existing = inFlight.get(cacheKey);
+    if (existing) {
+      queryOptions.onCacheStatus?.('memory_hit');
+      return existing;
     }
 
-    void embedding.catch(() => {
-      if (queryEmbeddingCache.get(cacheKey)?.embedding === embedding) {
-        queryEmbeddingCache.delete(cacheKey);
+    const { pool } = queryOptions;
+    const resolution = (async () => {
+      if (pool) {
+        // A failed cache read must not fail the search.
+        const stored = await readFromDatabase(pool, model, queryHash).catch(
+          () => null
+        );
+        if (stored) {
+          rememberInMemory(cacheKey, stored);
+          queryOptions.onCacheStatus?.('database_hit');
+          return stored;
+        }
       }
-    });
 
-    return embedding;
+      queryOptions.onCacheStatus?.('miss');
+      const embedding = await embedQueryImpl(text, model);
+      rememberInMemory(cacheKey, embedding);
+      if (pool) {
+        writeToDatabase(pool, model, queryHash, embedding);
+      }
+      return embedding;
+    })();
+
+    inFlight.set(cacheKey, resolution);
+    // Always clear the in-flight entry: on success the value now lives in the
+    // memory cache, and on failure the next caller must be free to retry.
+    void resolution.then(
+      () => inFlight.delete(cacheKey),
+      () => inFlight.delete(cacheKey)
+    );
+
+    return resolution;
   }
 
   return {
@@ -260,6 +390,36 @@ export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {
       queryOptions?: QueryEmbeddingOptions
     ): Promise<number[]> {
       return embedCachedQuery(text, model, queryOptions);
+    },
+    /** Resolves once every write-behind cache INSERT has settled. */
+    async flushPendingWrites(): Promise<void> {
+      await Promise.all(Array.from(pendingWrites));
+    },
+    /** Drops the memoized active model, forcing the next read to hit the database. */
+    invalidateActiveModel(): void {
+      activeModelCache = null;
+    },
+    /**
+     * Memoized variant for read paths, where this lookup used to add a database
+     * round trip to the critical path of every search.
+     *
+     * Deliberately NOT used by writers. A writer that acts on a stale model
+     * would attach chunks to the wrong (or a deleted) `embedding_models` row;
+     * a reader that does so at worst searches against a model that changed
+     * moments ago, and the query embedding cache is keyed by model id so no
+     * mismatched vector can be served. Background writes pay the extra SELECT.
+     */
+    async getActiveModelForQuery(pool: Pool): Promise<ActiveEmbeddingModel> {
+      if (activeModelCache && activeModelCache.expiresAt > now()) {
+        return activeModelCache.model;
+      }
+
+      const model = await this.getActiveModel(pool);
+      activeModelCache = {
+        model,
+        expiresAt: now() + activeModelTtlMs
+      };
+      return model;
     },
     async getActiveModel(pool: Pool): Promise<ActiveEmbeddingModel> {
       const result = await pool.query<ActiveModelRow>(

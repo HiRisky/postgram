@@ -137,49 +137,64 @@ async function seed(pool: Pool): Promise<void> {
 
 function captureSearchQueries(pool: Pool): {
   pool: Pool;
-  captured: { hybrid?: CapturedQuery; lexical?: CapturedQuery };
+  captured: { hybrid?: CapturedQuery };
+  counts: { total: number };
 } {
-  const captured: { hybrid?: CapturedQuery; lexical?: CapturedQuery } = {};
+  const captured: { hybrid?: CapturedQuery } = {};
+  const counts = { total: 0 };
   const instrumented = new Proxy(pool, {
     get(target, property, receiver) {
       if (property === 'query') {
         return (text: string, values?: unknown[]) => {
-          if (text.includes('search_tsvector @@')) {
-            captured.lexical = { text, values: values ?? [] };
-          } else if (text.includes('ROW_NUMBER() OVER')) {
+          counts.total += 1;
+          if (text.includes('ROW_NUMBER() OVER')) {
             captured.hybrid = { text, values: values ?? [] };
           }
           return target.query(text, values);
         };
       }
-      const value = Reflect.get(target, property, receiver) as unknown;
-      return typeof value === 'function' ? value.bind(target) : value;
+      const value: unknown = Reflect.get(target, property, receiver);
+      return typeof value === 'function'
+        ? (value.bind(target) as unknown)
+        : value;
     }
-  }) as Pool;
-  return { pool: instrumented, captured };
+  });
+  return { pool: instrumented, captured, counts };
 }
+
+/**
+ * The embedding provider is stubbed with a fixed delay so the gate measures
+ * what this repository controls: SQL time, and how often that provider delay is
+ * paid at all. It deliberately does NOT claim to measure real provider latency
+ * — that varies by provider and host, and a green gate here says nothing about
+ * it. `embeddingCallDelayMs` is set well above any plausible SQL time so a
+ * regression in cache hit rate shows up as a latency cliff rather than noise.
+ */
+const EMBEDDING_CALL_DELAY_MS = 250;
 
 async function runProfile(
   pool: Pool,
   input: {
     name: string;
-    embeddingDelayMs: number;
-    embeddingBudgetMs: number;
+    /** Reuse one query across runs so every call after the first is a cache hit. */
     repeated?: boolean;
-    expectedMode: 'hybrid' | 'lexical_fallback';
+    /** Share the cache across runs; false simulates a cold process. */
+    freshServicePerRun?: boolean;
   }
-): Promise<[string, Profile]> {
+): Promise<[string, Profile, { embeddingCalls: number }]> {
   const vector = new Array<number>(1536).fill(0.01);
-  const embeddingService = createEmbeddingService({
-    embedQuery: async () => {
-      if (input.embeddingDelayMs > 0) {
-        await sleep(input.embeddingDelayMs);
-      }
-      return vector;
-    }
-  });
+  let embeddingCalls = 0;
+  const embedQuery = async () => {
+    embeddingCalls += 1;
+    await sleep(EMBEDDING_CALL_DELAY_MS);
+    return vector;
+  };
+  let embeddingService = createEmbeddingService({ embedQuery });
 
   const run = async (iteration: number): Promise<number> => {
+    if (input.freshServicePerRun) {
+      embeddingService = createEmbeddingService({ embedQuery });
+    }
     const query = input.repeated
       ? 'postgres search latency benchmark entity 42'
       : `postgres search latency benchmark entity ${iteration + 1}`;
@@ -188,18 +203,10 @@ async function runProfile(
       pool,
       auth,
       { query, limit: 10, threshold: 0 },
-      {
-        embeddingService,
-        embeddingBudgetMs: input.embeddingBudgetMs
-      }
+      { embeddingService }
     );
     if (result.isErr()) {
       throw result.error;
-    }
-    if (result.value.searchMode !== input.expectedMode) {
-      throw new Error(
-        `${input.name} returned ${result.value.searchMode}; expected ${input.expectedMode}`
-      );
     }
     return performance.now() - started;
   };
@@ -207,22 +214,26 @@ async function runProfile(
   for (let index = 0; index < WARMUP_RUNS; index += 1) {
     await run(100 + index);
   }
+  embeddingCalls = 0;
   const samples: number[] = [];
   for (let index = 0; index < SAMPLE_RUNS; index += 1) {
     samples.push(await run(index));
   }
-  return [input.name, summarize(samples)];
+  return [input.name, summarize(samples), { embeddingCalls }];
 }
 
-function summarizeExplain(result: QueryResult): Record<string, unknown> {
-  const payload = result.rows[0]?.['QUERY PLAN'] as
-    | Array<{
-        'Planning Time'?: number;
-        'Execution Time'?: number;
-        Plan?: { 'Node Type'?: string; 'Shared Hit Blocks'?: number };
-      }>
-    | undefined;
-  const plan = payload?.[0];
+type ExplainRow = {
+  'QUERY PLAN'?: Array<{
+    'Planning Time'?: number;
+    'Execution Time'?: number;
+    Plan?: { 'Node Type'?: string; 'Shared Hit Blocks'?: number };
+  }>;
+};
+
+function summarizeExplain(
+  result: QueryResult<ExplainRow>
+): Record<string, unknown> {
+  const plan = result.rows[0]?.['QUERY PLAN']?.[0];
   return {
     planning_ms: plan?.['Planning Time'] ?? null,
     execution_ms: plan?.['Execution Time'] ?? null,
@@ -236,7 +247,7 @@ async function explain(
   query: CapturedQuery | undefined
 ): Promise<Record<string, unknown> | null> {
   if (!query) return null;
-  const result = await pool.query(
+  const result = await pool.query<ExplainRow>(
     `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query.text}`,
     query.values
   );
@@ -244,66 +255,54 @@ async function explain(
 }
 
 const database = await createTestDatabase();
+let report: unknown;
 try {
   await seed(database.pool);
-  const { pool, captured } = captureSearchQueries(database.pool);
-  const profileEntries: Array<[string, Profile]> = [];
-  profileEntries.push(
-    await runProfile(pool, {
-      name: 'sql_only_unique',
-      embeddingDelayMs: 0,
-      embeddingBudgetMs: 350,
-      expectedMode: 'hybrid'
-    })
-  );
-  profileEntries.push(
-    await runProfile(pool, {
-      name: 'hybrid_unique_250ms_embedding',
-      embeddingDelayMs: 250,
-      embeddingBudgetMs: 350,
-      expectedMode: 'hybrid'
-    })
-  );
-  profileEntries.push(
-    await runProfile(pool, {
-      name: 'lexical_fallback_500ms_embedding',
-      embeddingDelayMs: 500,
-      embeddingBudgetMs: 350,
-      expectedMode: 'lexical_fallback'
-    })
-  );
-  profileEntries.push(
-    await runProfile(pool, {
-      name: 'cache_hit_repeated',
-      embeddingDelayMs: 250,
-      embeddingBudgetMs: 350,
-      repeated: true,
-      expectedMode: 'hybrid'
-    })
-  );
-  const profiles = Object.fromEntries(profileEntries) as Record<
-    string,
-    Profile
-  >;
+  const { pool, captured, counts } = captureSearchQueries(database.pool);
 
-  const report = {
+  const runs = [
+    // Every query is unique, so every search pays the provider round trip.
+    // This is the worst case and the upper bound on search latency.
+    await runProfile(pool, { name: 'cold_unique_queries' }),
+    // The same query repeatedly: served from the in-process cache.
+    await runProfile(pool, { name: 'memory_cache_hit', repeated: true }),
+    // The same query repeatedly, but with a fresh service each run so the
+    // in-process cache is always empty. Only the Postgres-backed cache can
+    // satisfy these — this is what a restarted process sees.
+    await runProfile(pool, {
+      name: 'database_cache_hit',
+      repeated: true,
+      freshServicePerRun: true
+    })
+  ];
+
+  const profiles = Object.fromEntries(
+    runs.map(([name, profile]) => [name, profile])
+  ) as Record<string, Profile>;
+  const embeddingCalls = Object.fromEntries(
+    runs.map(([name, , stats]) => [name, stats.embeddingCalls])
+  ) as Record<string, number>;
+
+  report = {
     dataset: { entities: ENTITY_COUNT, chunks: CHUNK_COUNT },
     samples: SAMPLE_RUNS,
+    embedding_call_delay_ms: EMBEDDING_CALL_DELAY_MS,
     profiles,
-    explain: {
-      hybrid: await explain(database.pool, captured.hybrid),
-      lexical: await explain(database.pool, captured.lexical)
-    }
+    embedding_calls: embeddingCalls,
+    database_queries: counts.total,
+    explain: { hybrid: await explain(database.pool, captured.hybrid) }
   };
 
   if (process.argv.includes('--assert')) {
-    const thresholds: Record<string, number> = {
-      sql_only_unique: 125,
-      hybrid_unique_250ms_embedding: 450,
-      lexical_fallback_500ms_embedding: 500,
-      cache_hit_repeated: 125
+    const maxP95: Record<string, number> = {
+      // One provider round trip plus SQL.
+      cold_unique_queries: EMBEDDING_CALL_DELAY_MS + 150,
+      // No provider round trip at all: this must stay pure SQL time.
+      memory_cache_hit: 125,
+      // One extra indexed SELECT versus a memory hit, and still no round trip.
+      database_cache_hit: 150
     };
-    for (const [name, maximum] of Object.entries(thresholds)) {
+    for (const [name, maximum] of Object.entries(maxP95)) {
       const actual = profiles[name]?.p95_ms;
       if (actual === undefined || actual > maximum) {
         throw new Error(
@@ -311,9 +310,29 @@ try {
         );
       }
     }
-  }
 
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    // Guards the cache itself rather than just its latency effect: a cache that
+    // silently stopped working would still pass a wall-clock threshold on a
+    // fast CI box, but cannot pass this.
+    const maxEmbeddingCalls: Record<string, number> = {
+      cold_unique_queries: SAMPLE_RUNS,
+      memory_cache_hit: 0,
+      database_cache_hit: 0
+    };
+    for (const [name, maximum] of Object.entries(maxEmbeddingCalls)) {
+      const actual = embeddingCalls[name];
+      if (actual === undefined || actual > maximum) {
+        throw new Error(
+          `${name} made ${actual ?? 'missing'} embedding calls; expected at most ${maximum}`
+        );
+      }
+    }
+  }
 } finally {
   await database.close();
+  // Written in `finally` so a failed assertion still emits the numbers that
+  // explain the failure rather than an empty artifact.
+  if (report !== undefined) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  }
 }

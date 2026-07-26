@@ -560,13 +560,15 @@ Latency:
 
 - Store should be comfortably below 200 ms excluding background enrichment
 - Recall should be below 200 ms
-- Hybrid search should be below 500 ms when the embedding provider responds
-  within `SEARCH_EMBEDDING_BUDGET_MS`
-- If the embedding exceeds the budget, search should return keyword matches
-  with `search_mode: "lexical_fallback"` and
-  `fallback_reason: "embedding_timeout"` instead of waiting for the provider
-- If the embedding provider fails, the same fallback should return with
-  `fallback_reason: "embedding_error"`
+- A search whose query embedding is already cached should be dominated by SQL
+  time — repeat the same query twice and confirm the second call is markedly
+  faster than the first
+- Restart the server and repeat that query again: it should still be fast,
+  because the cache lives in `query_embedding_cache` rather than in memory
+- A search whose embedding is not cached costs one provider round trip, bounded
+  by `EMBEDDING_TIMEOUT_MS`
+- If the embedding provider fails or times out, search returns an
+  `EMBEDDING_FAILED` error rather than silently degrading to keyword matches
 
 Run the reproducible search latency gate (Docker is required for its isolated
 PostgreSQL/pgvector database):

@@ -30,9 +30,17 @@ const configSchema = z
       .int()
       .positive()
       .default(1000),
-    SEARCH_EMBEDDING_BUDGET_MS: z.preprocess(
+    EMBEDDING_TIMEOUT_MS: z.preprocess(
       emptyToUndefined,
-      z.coerce.number().int().positive().default(350)
+      z.coerce.number().int().positive().default(15000)
+    ),
+    QUERY_EMBEDDING_CACHE_SIZE: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().default(512)
+    ),
+    QUERY_EMBEDDING_CACHE_RETENTION_DAYS: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().positive().default(30)
     ),
     EXTRACTION_ENABLED: z
       .enum(['true', 'false'])

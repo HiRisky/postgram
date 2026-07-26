@@ -14,7 +14,10 @@ import type { AppConfig } from './config.js';
 import { checkDatabaseHealth, createPool } from './db/pool.js';
 import { runMigrations } from './db/migrate.js';
 import type { EmbeddingService } from './services/embedding-service.js';
-import { createEmbeddingService } from './services/embedding-service.js';
+import {
+  createEmbeddingService,
+  pruneQueryEmbeddingCache
+} from './services/embedding-service.js';
 import {
   createEmbeddingProvider,
   resolveEmbeddingDefaults,
@@ -60,7 +63,6 @@ type AppVariables = {
 type AppOptions = {
   pool?: Pool;
   embeddingService?: EmbeddingService | undefined;
-  searchEmbeddingBudgetMs?: number | undefined;
   logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
   extractionEnabled?: boolean | undefined;
   oauth?:
@@ -85,6 +87,7 @@ type AppOptions = {
 };
 
 const FIRST_RUN_BOOTSTRAP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const QUERY_EMBEDDING_CACHE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 function getDefaultHealthStatus(): HealthStatus {
   return {
@@ -126,7 +129,8 @@ export function buildEmbeddingProviderConfig(
       provider: 'openai',
       model,
       dimensions,
-      apiKey: config.OPENAI_API_KEY
+      apiKey: config.OPENAI_API_KEY,
+      timeoutMs: config.EMBEDDING_TIMEOUT_MS
     };
   }
 
@@ -136,7 +140,8 @@ export function buildEmbeddingProviderConfig(
     model,
     dimensions,
     baseUrl,
-    apiKey: config.EMBEDDING_API_KEY
+    apiKey: config.EMBEDDING_API_KEY,
+    timeoutMs: config.EMBEDDING_TIMEOUT_MS
   };
 }
 
@@ -276,7 +281,6 @@ export function createApp(
     app.use('/api/*', createAuthMiddleware({ pool: options.pool }));
     registerRestRoutes(app, options.pool, {
       embeddingService: options.embeddingService,
-      searchEmbeddingBudgetMs: options.searchEmbeddingBudgetMs,
       logger: options.logger,
       ...(options.extractionEnabled !== undefined
         ? { extractionEnabled: options.extractionEnabled }
@@ -284,7 +288,6 @@ export function createApp(
     });
     registerMcpRoutes(app, options.pool, {
       embeddingService: options.embeddingService,
-      searchEmbeddingBudgetMs: options.searchEmbeddingBudgetMs,
       logger: options.logger,
       resourceMetadataUrl:
         options.oauth?.enabled && options.oauth.publicBaseUrl
@@ -370,7 +373,8 @@ export async function startServer(): Promise<{
   const embeddingProvider: EmbeddingProvider =
     createEmbeddingProvider(providerConfig);
   const embeddingService = createEmbeddingService({
-    provider: embeddingProvider
+    provider: embeddingProvider,
+    queryCacheMaxSize: runtimeConfig.QUERY_EMBEDDING_CACHE_SIZE
   });
 
   logger.info(
@@ -498,6 +502,9 @@ export async function startServer(): Promise<{
     }
   });
   let workerActive = true;
+  // Prune the query embedding cache on a slow timer rather than per request:
+  // the read path must stay a single indexed SELECT with no write behind it.
+  let nextCachePruneAt = 0;
   const workerLoop = async () => {
     while (workerActive) {
       try {
@@ -505,6 +512,22 @@ export async function startServer(): Promise<{
       } catch (error) {
         logger.error({ err: error }, 'enrichment worker iteration failed');
       }
+
+      if (Date.now() >= nextCachePruneAt) {
+        nextCachePruneAt = Date.now() + QUERY_EMBEDDING_CACHE_PRUNE_INTERVAL_MS;
+        try {
+          const pruned = await pruneQueryEmbeddingCache(
+            pool,
+            runtimeConfig.QUERY_EMBEDDING_CACHE_RETENTION_DAYS
+          );
+          if (pruned > 0) {
+            logger.debug({ pruned }, 'pruned query embedding cache');
+          }
+        } catch (error) {
+          logger.warn({ err: error }, 'query embedding cache prune failed');
+        }
+      }
+
       await new Promise<void>((resolve) => {
         setTimeout(resolve, config.ENRICHMENT_POLL_INTERVAL_MS);
       });
@@ -515,7 +538,6 @@ export async function startServer(): Promise<{
   const app = createApp({
     pool,
     embeddingService,
-    searchEmbeddingBudgetMs: runtimeConfig.SEARCH_EMBEDDING_BUDGET_MS,
     logger,
     extractionEnabled: runtimeConfig.EXTRACTION_ENABLED,
     adminMfaSecretKey: config.ADMIN_MFA_SECRET_KEY,

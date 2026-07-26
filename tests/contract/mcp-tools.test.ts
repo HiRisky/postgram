@@ -768,10 +768,8 @@ describe('MCP tools', () => {
           }
         })) as ToolResultPayload
       ) as {
-        search_mode: string;
         results: Array<{ id: string }>;
       };
-      expect(searchResult.search_mode).toBe('hybrid');
       expect(searchResult.results.map((entry) => entry.id).sort()).toEqual(
         [shared.entity.id, productManager.entity.id].sort()
       );
@@ -1117,7 +1115,6 @@ describe('MCP tools', () => {
       expect(toonText).toContain(
         'results[2]{id,type,score,content,chunk,tags,edges,related}:'
       );
-      expect(toonText).toContain('search_mode:hybrid');
       expect(toonText).toContain(stored.entity.id);
       expect(toonText).toContain('1 edges: depends_on=1');
       expect(toonText).not.toContain('created_at');
@@ -1514,7 +1511,7 @@ describe('MCP tools', () => {
     }
   }, 120_000);
 
-  it('returns marked lexical fallback when embedding fails', async () => {
+  it('surfaces an error when query embedding fails', async () => {
     const failingEmbeddingService = createEmbeddingService({
       embedQuery: () => {
         throw new Error('forced query embedding failure');
@@ -1532,15 +1529,10 @@ describe('MCP tools', () => {
         }
       })) as ToolResultPayload;
 
-      expect(searchResult.isError).toBeUndefined();
-      const payload = extractStructuredPayload(searchResult) as {
-        search_mode: string;
-        fallback_reason: string;
-        results: unknown[];
-      };
-      expect(payload.search_mode).toBe('lexical_fallback');
-      expect(payload.fallback_reason).toBe('embedding_error');
-      expect(payload.results).toEqual([]);
+      // Degrading to keyword matches here would hand the caller confidently
+      // scored results from a different ranking scale; failing loudly is the
+      // honest outcome.
+      expect(searchResult.isError).toBe(true);
     } finally {
       await close();
     }
