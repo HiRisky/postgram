@@ -7,6 +7,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { ServiceResult } from '../types/common.js';
 import type { EntityType, Visibility } from '../types/entities.js';
 import { AppError, ErrorCode } from '../util/errors.js';
+import { keyVerificationCache } from './key-verification-cache.js';
 import type { ApiKeyRecord, AuthContext, Scope } from './types.js';
 
 type CreateKeyInput = {
@@ -216,7 +217,10 @@ export function validateKey(
       }
 
       for (const row of result.rows) {
-        const valid = await argon2.verify(row.key_hash, plaintextKey);
+        const valid = await keyVerificationCache.verify(
+          row.key_hash,
+          plaintextKey
+        );
         if (valid) {
           return toAuthContext(mapApiKeyRecord(row));
         }

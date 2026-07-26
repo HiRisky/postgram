@@ -98,4 +98,30 @@ describe('key-service', () => {
     expect(validated.isErr()).toBe(true);
     expect(validated._unsafeUnwrapErr().code).toBe(ErrorCode.UNAUTHORIZED);
   }, 120_000);
+
+  it('rejects a revoked key that was already validated once', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    const created = (await createKey(database.pool, {
+      name: 'agent-gamma',
+      scopes: ['read'],
+      allowedVisibility: ['shared']
+    }))._unsafeUnwrap();
+
+    // Validate first, so the argon2 comparison for this key is memoized.
+    // Revocation must not depend on that cache expiring: the active-key
+    // lookup runs before the comparison and is what rejects the key.
+    const before = await validateKey(database.pool, created.plaintextKey);
+    expect(before.isOk()).toBe(true);
+
+    expect((await revokeKey(database.pool, created.record.id)).isOk()).toBe(
+      true
+    );
+
+    const after = await validateKey(database.pool, created.plaintextKey);
+    expect(after.isErr()).toBe(true);
+    expect(after._unsafeUnwrapErr().code).toBe(ErrorCode.UNAUTHORIZED);
+  }, 120_000);
 });
