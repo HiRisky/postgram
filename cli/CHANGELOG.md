@@ -1,3 +1,9 @@
+## [1.36.0](https://github.com/ivo-toby/postgram/compare/cli-v1.35.1...cli-v1.36.0) (2026-07-26)
+
+### Features
+
+* **perf:** cache query embeddings instead of racing them ([#102](https://github.com/ivo-toby/postgram/issues/102)) ([194e730](https://github.com/ivo-toby/postgram/commit/194e73088560ca094337579b8b31503d8caf08f9))
+
 ## [1.35.1](https://github.com/ivo-toby/postgram/compare/cli-v1.35.0...cli-v1.35.1) (2026-07-15)
 
 ### Bug Fixes
