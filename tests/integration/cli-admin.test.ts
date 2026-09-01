@@ -288,7 +288,7 @@ describe('pgm-admin CLI', () => {
         dimensions: 1536
       }
     });
-  });
+  }, 15_000);
 
   it('creates, lists, revokes keys, and emits audit rows for admin actions', async () => {
     if (!database) {

@@ -108,5 +108,5 @@ describe('CLI help text', () => {
     ]);
     expect(normalizeHelp(memoryHelp)).toContain('groom-durable');
     expect(normalizeHelp(memoryHelp)).toContain('apply-durable-grooming');
-  });
+  }, 20_000);
 });

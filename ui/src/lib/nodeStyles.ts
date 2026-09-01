@@ -17,12 +17,12 @@ const FIXED_SIZES: Record<string, number> = {
 };
 
 export function getNodeColor(type: string): string {
-  return ENTITY_COLORS[type] ?? ENTITY_COLORS['default']!;
+  return ENTITY_COLORS[type] ?? ENTITY_COLORS['default'];
 }
 
 export function getNodeSize(type: string, edgeCount: number): number {
   if (FIXED_SIZE_TYPES.has(type)) return FIXED_SIZES[type] ?? 6;
-  if (type === 'project') return FIXED_SIZES['project']!;
+  if (type === 'project') return FIXED_SIZES['project'];
   return Math.min(6 + Math.sqrt(edgeCount) * 2, 20);
 }
 

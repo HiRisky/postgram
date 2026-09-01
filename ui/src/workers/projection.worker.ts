@@ -34,6 +34,10 @@ export type ProjectionResponse =
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
+function zeroCoordinates(dim: 2 | 3): number[] {
+  return Array.from({ length: dim }, () => 0);
+}
+
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0;
   let na = 0;
@@ -102,10 +106,25 @@ function runUmap(
   return umap.getEmbedding();
 }
 
+function isNumberMatrix(value: unknown): value is number[][] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row: unknown) =>
+        Array.isArray(row) &&
+        row.every((entry: unknown) => typeof entry === 'number')
+    )
+  );
+}
+
 function runPca(embeddings: number[][], dim: 2 | 3): number[][] {
   const pca = new PCA(embeddings);
   const projected = pca.predict(embeddings, { nComponents: dim });
-  return projected.to2DArray();
+  const values: unknown = projected.to2DArray();
+  if (!isNumberMatrix(values)) {
+    throw new Error('PCA returned invalid coordinates');
+  }
+  return values;
 }
 
 ctx.onmessage = (event: MessageEvent<ProjectionRequest>) => {
@@ -130,7 +149,7 @@ ctx.onmessage = (event: MessageEvent<ProjectionRequest>) => {
   if (embeddings.length < 2) {
     const positions = ids.map<ProjectionPosition>((id) => ({
       id,
-      coords: new Array(dim).fill(0),
+      coords: zeroCoordinates(dim),
     }));
     const response: ProjectionResponse = { type: 'result', positions };
     ctx.postMessage(response);
@@ -145,7 +164,7 @@ ctx.onmessage = (event: MessageEvent<ProjectionRequest>) => {
 
     const positions: ProjectionPosition[] = ids.map((id, i) => ({
       id,
-      coords: result[i] ?? new Array(dim).fill(0),
+      coords: result[i] ?? zeroCoordinates(dim),
     }));
 
     const response: ProjectionResponse = {
