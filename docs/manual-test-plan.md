@@ -564,7 +564,8 @@ Latency:
   time — repeat the same query twice and confirm the second call is markedly
   faster than the first
 - Restart the server and repeat that query again: it should still be fast,
-  because the cache lives in `query_embedding_cache` rather than in memory
+  because the cache lives in `query_embedding_cache` rather than in memory;
+  the hourly prune retains the 2,000 most recent queries per client
 - A search whose embedding is not cached costs one provider round trip, bounded
   by `EMBEDDING_TIMEOUT_MS`
 - If the embedding provider fails or times out, search returns an

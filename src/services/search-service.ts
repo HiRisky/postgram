@@ -404,20 +404,32 @@ export function searchEntities(
       timings['activeModelMs'] = Date.now() - modelStartedAt;
 
       const embeddingStartedAt = Date.now();
-      const queryEmbedding = await embeddingService.embedQuery(
-        query,
-        activeModel,
-        {
-          pool,
-          // Partitions cache entries per client so one client cannot detect
-          // another's queries by timing a hit. An unauthenticated context has
-          // no scope and simply is not cached.
-          ...(auth.clientId ? { cacheScope: auth.clientId } : {}),
-          onCacheStatus: (status) => {
-            cacheStatus = status;
+      let queryEmbedding: number[];
+      try {
+        queryEmbedding = await embeddingService.embedQuery(
+          query,
+          activeModel,
+          {
+            pool,
+            // Partitions cache entries per client so one client cannot detect
+            // another's queries by timing a hit. An unauthenticated context has
+            // no scope and simply is not cached.
+            ...(auth.clientId ? { cacheScope: auth.clientId } : {}),
+            onCacheStatus: (status) => {
+              cacheStatus = status;
+            }
           }
+        );
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
         }
-      );
+
+        throw new AppError(
+          ErrorCode.EMBEDDING_FAILED,
+          error instanceof Error ? error.message : 'Failed to embed query text'
+        );
+      }
       timings['embeddingMs'] = Date.now() - embeddingStartedAt;
 
       const hybridStartedAt = Date.now();

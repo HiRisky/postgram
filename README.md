@@ -642,10 +642,10 @@ those values outside database backups and browser storage.
 | `EMBEDDING_DIMENSIONS` | no                   | per-provider                    | Must match the active `embedding_models` row. Run `./bin/pgm-admin embeddings migrate --target-dimensions <N> --yes` to change. |
 | `EMBEDDING_BASE_URL`   | when provider=ollama | falls back to `OLLAMA_BASE_URL` | Embedding host. Independent from LLM-extraction host so embeddings and inference can target different machines.                 |
 | `EMBEDDING_API_KEY`    | no                   |                                 | Optional bearer token for `EMBEDDING_BASE_URL`.                                                                                 |
-| `EMBEDDING_TIMEOUT_MS` | no                   | `15000`                         | Hard timeout for a single embedding provider call. Bounds how long one stalled request can hold a connection. |
+| `EMBEDDING_TIMEOUT_MS` | no                   | `15000`                         | Hard timeout for a single embedding provider call. Bounds how long one stalled call can delay a request. |
 | `QUERY_EMBEDDING_CACHE_SIZE` | no             | `512`                           | In-process query embeddings held in front of the Postgres-backed cache. |
 | `QUERY_EMBEDDING_CACHE_SECRET` | no           |                                 | Keys the query digest with an HMAC. Without it the digest is an unkeyed sha256, which a reader of the database can dictionary-test to confirm whether a guessed query was run. Set it if you treat query text as more sensitive than entity content; it must live outside the database to mean anything. Changing it invalidates existing cache rows. |
-| `QUERY_EMBEDDING_CACHE_RETENTION_DAYS` | no   | `30`                            | Age at which persisted query embeddings are pruned. |
+| `QUERY_EMBEDDING_CACHE_RETENTION_DAYS` | no   | `30`                            | Age at which persisted query embeddings are pruned. The hourly prune also retains only the 2,000 newest entries per client. |
 
 When Postgram runs in Docker and Ollama runs directly on the Docker host, use `http://host.docker.internal:11434` for `EMBEDDING_BASE_URL`; `localhost` inside the container points at the Postgram container, not the host machine.
 

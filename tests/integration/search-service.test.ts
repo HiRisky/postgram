@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { createEmbeddingService } from '../../src/services/embedding-service.js';
+import {
+  createEmbeddingService,
+  pruneQueryEmbeddingCache
+} from '../../src/services/embedding-service.js';
 import { createEnrichmentWorker } from '../../src/services/enrichment-worker.js';
 import { createEdge } from '../../src/services/edge-service.js';
 import { searchEntities } from '../../src/services/search-service.js';
 import { softDeleteEntity, storeEntity } from '../../src/services/entity-service.js';
 import type { AuthContext } from '../../src/auth/types.js';
+import { ErrorCode } from '../../src/util/errors.js';
 import {
   createTestDatabase,
   resetTestDatabase,
@@ -677,6 +681,38 @@ describe('search-service', () => {
     // however irrelevant it is. Returning those under the caller's semantic
     // threshold would be worse than returning nothing.
     expect(result.isErr()).toBe(true);
+    expect(result._unsafeUnwrapErr().code).toBe(ErrorCode.EMBEDDING_FAILED);
+  }, 120_000);
+
+  it('bounds persisted query embeddings per client', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    const embeddingService = createEmbeddingService({
+      embedQuery: () => Promise.resolve(new Array<number>(1536).fill(0.01))
+    });
+
+    for (const query of ['query one', 'query two', 'query three']) {
+      const result = await searchEntities(
+        database.pool,
+        makeAuthContext(),
+        { query, threshold: 0 },
+        { embeddingService }
+      );
+      expect(result.isOk()).toBe(true);
+    }
+    await embeddingService.flushPendingWrites();
+    const pruned = await pruneQueryEmbeddingCache(database.pool, 30, 2);
+
+    const cached = await database.pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count
+       FROM query_embedding_cache
+       WHERE client_id = $1`,
+      [makeAuthContext().clientId]
+    );
+    expect(pruned).toBe(1);
+    expect(cached.rows[0]?.count).toBe(2);
   }, 120_000);
 
   it('serves a repeated query embedding from Postgres across service instances', async () => {

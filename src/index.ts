@@ -89,6 +89,20 @@ type AppOptions = {
 const FIRST_RUN_BOOTSTRAP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const QUERY_EMBEDDING_CACHE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
+type CloseServerResourcesOptions = {
+  closeHttpServer: () => Promise<void>;
+  flushPendingWrites: () => Promise<void>;
+  closePool: () => Promise<void>;
+};
+
+export async function closeServerResources(
+  options: CloseServerResourcesOptions
+): Promise<void> {
+  await options.closeHttpServer();
+  await options.flushPendingWrites();
+  await options.closePool();
+}
+
 function getDefaultHealthStatus(): HealthStatus {
   return {
     postgres: 'disconnected',
@@ -587,10 +601,14 @@ export async function startServer(): Promise<{
 
   const close = async () => {
     workerActive = false;
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
+    await closeServerResources({
+      closeHttpServer: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+      flushPendingWrites: () => embeddingService.flushPendingWrites(),
+      closePool: () => pool.end()
     });
-    await pool.end();
   };
 
   process.once('SIGTERM', () => {
