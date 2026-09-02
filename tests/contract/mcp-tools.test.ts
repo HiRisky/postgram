@@ -1033,7 +1033,11 @@ describe('MCP tools', () => {
         })) as ToolResultPayload
       ) as {
         results: Array<{
-          entity: { id: string; metadata: Record<string, unknown> };
+          entity: {
+            id: string;
+            content: string | null;
+            metadata: Record<string, unknown>;
+          };
           chunk_content: string;
           similarity: number;
         }>;
@@ -1043,6 +1047,9 @@ describe('MCP tools', () => {
         (entry) => entry.entity.id === stored.entity.id
       );
       expect(fullHit?.chunk_content).toContain('compact search');
+      expect(fullHit?.entity.content).toBe(
+        'token compact search response shape'
+      );
       expect(fullHit?.similarity).toEqual(expect.any(Number));
 
       const compact = extractStructuredPayload(
@@ -1060,6 +1067,7 @@ describe('MCP tools', () => {
             count: number;
             relations: Array<{ relation: string; count: number }>;
           };
+          content?: unknown;
           related?: unknown[];
         }>;
       };
@@ -1071,6 +1079,7 @@ describe('MCP tools', () => {
         count: 1,
         relations: [{ relation: 'depends_on', count: 1 }]
       });
+      expect(compactHit).not.toHaveProperty('content');
       expect(compactHit).not.toHaveProperty('related');
 
       const expanded = extractStructuredPayload(
@@ -1086,7 +1095,10 @@ describe('MCP tools', () => {
         results: Array<{
           id: string;
           edges?: unknown;
-          related?: Array<{ relation: string }>;
+          related?: Array<{
+            relation: string;
+            content?: unknown;
+          }>;
         }>;
       };
       expect(expanded.results).toHaveLength(2);
@@ -1100,6 +1112,9 @@ describe('MCP tools', () => {
       expect(expandedHit?.related?.map((entry) => entry.relation)).toContain(
         'depends_on'
       );
+      expect(
+        expandedHit?.related?.every((entry) => !('content' in entry))
+      ).toBe(true);
 
       const toonResult = (await client.callTool({
         name: 'search',
@@ -1113,8 +1128,9 @@ describe('MCP tools', () => {
         toonResult.content?.find((item) => item.type === 'text')?.text ?? '';
       expect(toonResult.structuredContent).toEqual({ toon: toonText });
       expect(toonText).toContain(
-        'results[2]{id,type,score,content,chunk,tags,edges,related}:'
+        'results[2]{id,type,score,chunk,tags,edges,related}:'
       );
+      expect(toonText).not.toContain('{id,type,score,content,chunk');
       expect(toonText).toContain(stored.entity.id);
       expect(toonText).toContain('1 edges: depends_on=1');
       expect(toonText).not.toContain('created_at');

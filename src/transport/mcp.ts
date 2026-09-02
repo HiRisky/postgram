@@ -521,7 +521,7 @@ function createSessionServer(
     'search',
     {
       description:
-        'Search stored knowledge using hybrid BM25 + vector similarity with recency weighting. Compact results may include edges.count and edges.relations so agents can see traversable graph context without neighbor content. Set expand_graph=true to also return graph-connected entities (requires extraction to have run on the matching documents — use the queue tool to check status). Use expand_graph when exploring relationships, tracing decisions, or understanding what else is connected to a topic; avoid it for direct facts already present in compact results.',
+        'Search stored knowledge using hybrid BM25 + vector similarity with recency weighting. Compact results contain matched chunks rather than complete entity content; recall a selected result by id when its full content is needed. Compact results may include edges.count and edges.relations so agents can see traversable graph context without neighbor content. Set expand_graph=true to also return graph-connected entities (requires extraction to have run on the matching documents — use the queue tool to check status). Use expand_graph when exploring relationships, tracing decisions, or understanding what else is connected to a topic; avoid it for direct facts already present in compact results. Set full_response=true only when the complete legacy search envelope, including entity content, is required.',
       inputSchema: {
         query: z.string().min(1),
         type: entityTypeSchema.optional(),
@@ -555,6 +555,7 @@ function createSessionServer(
             expandGraph: args.expand_graph,
             includeArchived: args.include_archived,
             memoryRole: args.memory_role,
+            includeContent: args.full_response === true
           },
           {
             embeddingService: options.embeddingService,
