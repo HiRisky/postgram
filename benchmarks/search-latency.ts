@@ -274,6 +274,7 @@ async function runProfile(
 type RecallProfile = {
   exact_results: number;
   hnsw_results: number;
+  hnsw_strategy: string | null;
   overlap: number;
   recall: number;
 };
@@ -292,9 +293,13 @@ async function measureRecall(pool: Pool): Promise<RecallProfile> {
     strategyOverride: 'exact'
   });
   if (exact.isErr()) throw exact.error;
+  let hnswStrategy: string | null = null;
   const hnsw = await searchEntities(pool, auth, input, {
     embeddingService,
-    strategyOverride: 'hnsw'
+    strategyOverride: 'hnsw',
+    onStrategy: (strategy) => {
+      hnswStrategy = strategy;
+    }
   });
   if (hnsw.isErr()) throw hnsw.error;
 
@@ -308,6 +313,7 @@ async function measureRecall(pool: Pool): Promise<RecallProfile> {
   return {
     exact_results: exactIds.size,
     hnsw_results: hnswIds.size,
+    hnsw_strategy: hnswStrategy,
     overlap,
     recall: exactIds.size === 0 ? 1 : overlap / exactIds.size
   };
@@ -421,6 +427,11 @@ try {
     }
     if (exactExplain?.indexes.includes('idx_chunks_embedding')) {
       throw new Error('exact search plan used idx_chunks_embedding');
+    }
+    if (recall.hnsw_strategy !== 'hnsw') {
+      throw new Error(
+        `HNSW recall probe used ${recall.hnsw_strategy ?? 'no strategy'}`
+      );
     }
     if (recall.exact_results === 0 || recall.recall < 0.8) {
       throw new Error(

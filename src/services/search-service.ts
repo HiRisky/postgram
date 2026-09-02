@@ -91,12 +91,14 @@ type SearchInput = {
 };
 
 type SearchStrategyOverride = 'auto' | 'exact' | 'hnsw';
+type HybridSearchStrategy = 'exact' | 'hnsw' | 'hnsw_exact_fallback';
 
 type SearchOptions = {
   embeddingService?: EmbeddingService | undefined;
   now?: (() => Date) | undefined;
   logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
   strategyOverride?: SearchStrategyOverride | undefined;
+  onStrategy?: ((strategy: HybridSearchStrategy) => void) | undefined;
 };
 
 export type SearchResponse = {
@@ -269,7 +271,6 @@ const HNSW_CANDIDATES_SQL = `
   LIMIT $9
 `;
 
-type HybridSearchStrategy = 'exact' | 'hnsw' | 'hnsw_exact_fallback';
 type HybridQueryResult = {
   results: SearchResult[];
   candidateCount: number;
@@ -733,6 +734,7 @@ export function searchEntities(
         options.strategyOverride
       );
       timings['hybridSqlMs'] = Date.now() - hybridStartedAt;
+      options.onStrategy?.(results.strategy);
 
       const edgeStartedAt = Date.now();
       const resultEntityIds = results.results.map((r) => r.entityId);
