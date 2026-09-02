@@ -78,7 +78,7 @@ async function seed(pool: Pool): Promise<void> {
         END,
         'active',
         'completed',
-        ARRAY['benchmark'],
+        ARRAY['benchmark', 'bucket-' || (value % 10)],
         '{}'::jsonb,
         now() - (value || ' minutes')::interval,
         now()
@@ -101,10 +101,20 @@ async function seed(pool: Pool): Promise<void> {
         e.id,
         0,
         left(e.content, 500),
-        array_fill(0.01::real, ARRAY[1536])::vector,
+        (
+          ARRAY[
+            ((e.value % 17) + 1)::real / 17,
+            ((e.value % 31) + 1)::real / 31
+          ]::real[] || array_fill(0.01::real, ARRAY[1534])
+        )::vector,
         (SELECT id FROM embedding_models WHERE is_active = true),
         100
-      FROM entities e
+      FROM (
+        SELECT
+          entities.*,
+          row_number() OVER (ORDER BY id) AS value
+        FROM entities
+      ) e
     `
   );
 
@@ -122,10 +132,20 @@ async function seed(pool: Pool): Promise<void> {
         e.id,
         1,
         right(e.content, 500),
-        array_fill(0.011::real, ARRAY[1536])::vector,
+        (
+          ARRAY[
+            ((e.value % 19) + 1)::real / 19,
+            ((e.value % 29) + 1)::real / 29
+          ]::real[] || array_fill(0.011::real, ARRAY[1534])
+        )::vector,
         (SELECT id FROM embedding_models WHERE is_active = true),
         100
-      FROM entities e
+      FROM (
+        SELECT
+          entities.*,
+          row_number() OVER (ORDER BY id) AS value
+        FROM entities
+      ) e
       ORDER BY e.id
       LIMIT $1
     `,
@@ -137,15 +157,16 @@ async function seed(pool: Pool): Promise<void> {
 
 function captureSearchQueries(pool: Pool): {
   pool: Pool;
-  captured: { hybrid?: CapturedQuery };
+  captured: { exact?: CapturedQuery; hnsw?: CapturedQuery };
   counts: { total: number };
 } {
-  const captured: { hybrid?: CapturedQuery } = {};
+  const captured: { exact?: CapturedQuery; hnsw?: CapturedQuery } = {};
   const counts = { total: 0 };
   const capture = (text: string, values?: unknown[]): void => {
     counts.total += 1;
     if (text.includes('ROW_NUMBER() OVER')) {
-      captured.hybrid = { text, values: values ?? [] };
+      const strategy = text.includes('CROSS JOIN LATERAL') ? 'hnsw' : 'exact';
+      captured[strategy] = { text, values: values ?? [] };
     }
   };
   const instrumentClient = (client: PoolClient): PoolClient =>
@@ -193,6 +214,13 @@ function captureSearchQueries(pool: Pool): {
  */
 const EMBEDDING_CALL_DELAY_MS = 250;
 
+function benchmarkVector(): number[] {
+  const vector = new Array<number>(1536).fill(0.01);
+  vector[0] = 1;
+  vector[1] = 0.5;
+  return vector;
+}
+
 async function runProfile(
   pool: Pool,
   input: {
@@ -203,7 +231,7 @@ async function runProfile(
     freshServicePerRun?: boolean;
   }
 ): Promise<[string, Profile, { embeddingCalls: number }]> {
-  const vector = new Array<number>(1536).fill(0.01);
+  const vector = benchmarkVector();
   let embeddingCalls = 0;
   const embedQuery = async () => {
     embeddingCalls += 1;
@@ -241,6 +269,48 @@ async function runProfile(
     samples.push(await run(index));
   }
   return [input.name, summarize(samples), { embeddingCalls }];
+}
+
+type RecallProfile = {
+  exact_results: number;
+  hnsw_results: number;
+  overlap: number;
+  recall: number;
+};
+
+async function measureRecall(pool: Pool): Promise<RecallProfile> {
+  const embeddingService = createEmbeddingService({
+    embedQuery: () => Promise.resolve(benchmarkVector())
+  });
+  const input = {
+    query: 'postgres search latency benchmark entity 42',
+    limit: 10,
+    threshold: 0
+  };
+  const exact = await searchEntities(pool, auth, input, {
+    embeddingService,
+    strategyOverride: 'exact'
+  });
+  if (exact.isErr()) throw exact.error;
+  const hnsw = await searchEntities(pool, auth, input, {
+    embeddingService,
+    strategyOverride: 'hnsw'
+  });
+  if (hnsw.isErr()) throw hnsw.error;
+
+  const exactIds = new Set(
+    exact.value.results.map((result) => result.entityId)
+  );
+  const hnswIds = new Set(
+    hnsw.value.results.map((result) => result.entityId)
+  );
+  const overlap = Array.from(exactIds).filter((id) => hnswIds.has(id)).length;
+  return {
+    exact_results: exactIds.size,
+    hnsw_results: hnswIds.size,
+    overlap,
+    recall: exactIds.size === 0 ? 1 : overlap / exactIds.size
+  };
 }
 
 type ExplainPlanNode = {
@@ -331,7 +401,9 @@ try {
     runs.map(([name, , stats]) => [name, stats.embeddingCalls])
   ) as Record<string, number>;
 
-  const hybridExplain = await explain(database.pool, captured.hybrid);
+  const recall = await measureRecall(pool);
+  const hnswExplain = await explain(database.pool, captured.hnsw);
+  const exactExplain = await explain(database.pool, captured.exact);
   report = {
     dataset: { entities: ENTITY_COUNT, chunks: CHUNK_COUNT },
     samples: SAMPLE_RUNS,
@@ -339,12 +411,21 @@ try {
     profiles,
     embedding_calls: embeddingCalls,
     database_queries: counts.total,
-    explain: { hybrid: hybridExplain }
+    recall,
+    explain: { hnsw: hnswExplain, exact: exactExplain }
   };
 
   if (process.argv.includes('--assert')) {
-    if (!hybridExplain?.indexes.includes('idx_chunks_embedding')) {
-      throw new Error('hybrid search plan did not use idx_chunks_embedding');
+    if (!hnswExplain?.indexes.includes('idx_chunks_embedding')) {
+      throw new Error('HNSW search plan did not use idx_chunks_embedding');
+    }
+    if (exactExplain?.indexes.includes('idx_chunks_embedding')) {
+      throw new Error('exact search plan used idx_chunks_embedding');
+    }
+    if (recall.exact_results === 0 || recall.recall < 0.8) {
+      throw new Error(
+        `HNSW recall ${recall.recall.toFixed(2)} fell below 0.80`
+      );
     }
 
     const maxP95: Record<string, number> = {

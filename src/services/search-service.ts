@@ -44,6 +44,14 @@ type SearchRow = EntityRow & {
   score: number;
 };
 
+type EmptySearchRow = {
+  [Key in keyof SearchRow]: null;
+};
+
+type SearchEnvelopeRow =
+  | (SearchRow & { result_present: true; candidate_count: number })
+  | (EmptySearchRow & { result_present: false; candidate_count: number });
+
 export type SearchResult = {
   entity: Entity;
   entityId: string;
@@ -82,10 +90,13 @@ type SearchInput = {
   includeArchived?: boolean | undefined;
 };
 
+type SearchStrategyOverride = 'auto' | 'exact' | 'hnsw';
+
 type SearchOptions = {
   embeddingService?: EmbeddingService | undefined;
   now?: (() => Date) | undefined;
   logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
+  strategyOverride?: SearchStrategyOverride | undefined;
 };
 
 export type SearchResponse = {
@@ -229,7 +240,7 @@ const EXACT_CANDIDATES_SQL = `
   FROM chunks c
   JOIN entities e ON e.id = c.entity_id
   WHERE ${hybridEntityFilterConditions('e')}
-  ORDER BY distance
+  ORDER BY (c.embedding <=> $1::vector) + 0
   LIMIT $9
 `;
 
@@ -259,6 +270,11 @@ const HNSW_CANDIDATES_SQL = `
 `;
 
 type HybridSearchStrategy = 'exact' | 'hnsw' | 'hnsw_exact_fallback';
+type HybridQueryResult = {
+  results: SearchResult[];
+  candidateCount: number;
+  candidateLimit: number;
+};
 type HybridSearchResult = {
   results: SearchResult[];
   strategy: HybridSearchStrategy;
@@ -279,6 +295,22 @@ function mapSearchRows(rows: SearchRow[]): SearchResult[] {
       score: Number(row.score)
     };
   });
+}
+
+function mapSearchEnvelopeRows(rows: SearchEnvelopeRow[]): {
+  results: SearchResult[];
+  candidateCount: number;
+} {
+  const resultRows: SearchRow[] = [];
+  for (const row of rows) {
+    if (row.result_present) {
+      resultRows.push(row);
+    }
+  }
+  return {
+    results: mapSearchRows(resultRows),
+    candidateCount: Number(rows[0]?.candidate_count ?? 0)
+  };
 }
 
 function buildHybridSearchSql(candidateSql: string): string {
@@ -325,16 +357,23 @@ function buildHybridSearchSql(candidateSql: string): string {
       WHERE entity_rank = 1
       ORDER BY score DESC
       LIMIT $16
+    ),
+    candidate_stats AS (
+      SELECT COUNT(*)::integer AS candidate_count
+      FROM candidates
     )
     SELECT
+      top_results.entity_id IS NOT NULL AS result_present,
+      candidate_stats.candidate_count,
       e.*,
       c.content AS chunk_content,
       top_results.similarity,
       top_results.score
-    FROM top_results
-    JOIN entities e ON e.id = top_results.entity_id
-    JOIN chunks c ON c.id = top_results.chunk_id
-    ORDER BY top_results.score DESC
+    FROM candidate_stats
+    LEFT JOIN top_results ON true
+    LEFT JOIN entities e ON e.id = top_results.entity_id
+    LEFT JOIN chunks c ON c.id = top_results.chunk_id
+    ORDER BY top_results.score DESC NULLS LAST
   `;
 }
 
@@ -370,18 +409,19 @@ async function executeHybridSearch(
   input: SearchInput,
   ctx: HybridSearchContext,
   strategy: 'exact' | 'hnsw'
-): Promise<SearchResult[]> {
+): Promise<HybridQueryResult> {
   const candidateLimit = Math.min(
     ctx.limit * CANDIDATE_MULTIPLIER,
     CANDIDATE_CAP
   );
   const candidateSql =
     strategy === 'hnsw' ? HNSW_CANDIDATES_SQL : EXACT_CANDIDATES_SQL;
-  const rows = await queryable.query<SearchRow>(
+  const rows = await queryable.query<SearchEnvelopeRow>(
     buildHybridSearchSql(candidateSql),
     hybridSearchValues(auth, input, ctx, candidateLimit)
   );
-  return mapSearchRows(rows.rows);
+  const mapped = mapSearchEnvelopeRows(rows.rows);
+  return { ...mapped, candidateLimit };
 }
 
 function isBroadSearch(auth: AuthContext, input: SearchInput): boolean {
@@ -460,7 +500,7 @@ async function executeHnswSearch(
   auth: AuthContext,
   input: SearchInput,
   ctx: HybridSearchContext
-): Promise<SearchResult[] | null> {
+): Promise<HybridQueryResult | null> {
   if (hnswIterativeScanSupport.get(pool) === false) {
     return null;
   }
@@ -508,16 +548,32 @@ async function runHybridSearch(
   pool: Pool,
   auth: AuthContext,
   input: SearchInput,
-  ctx: HybridSearchContext
+  ctx: HybridSearchContext,
+  strategyOverride: SearchStrategyOverride = 'auto'
 ): Promise<HybridSearchResult> {
+  if (strategyOverride === 'exact') {
+    const exactResults = await executeHybridSearch(
+      pool,
+      auth,
+      input,
+      ctx,
+      'exact'
+    );
+    return { results: exactResults.results, strategy: 'exact' };
+  }
+
   const useHnsw =
+    strategyOverride === 'hnsw' ||
     isBroadSearch(auth, input) ||
     (await countFilteredChunks(pool, auth, input)) > EXACT_SEARCH_MAX_CHUNKS;
 
   if (useHnsw) {
     const hnswResults = await executeHnswSearch(pool, auth, input, ctx);
-    if (hnswResults && hnswResults.length >= ctx.limit) {
-      return { results: hnswResults, strategy: 'hnsw' };
+    if (
+      hnswResults &&
+      hnswResults.candidateCount >= hnswResults.candidateLimit
+    ) {
+      return { results: hnswResults.results, strategy: 'hnsw' };
     }
 
     const exactResults = await executeHybridSearch(
@@ -528,13 +584,20 @@ async function runHybridSearch(
       'exact'
     );
     return {
-      results: exactResults,
+      results: exactResults.results,
       strategy: hnswResults ? 'hnsw_exact_fallback' : 'exact'
     };
   }
 
+  const exactResults = await executeHybridSearch(
+    pool,
+    auth,
+    input,
+    ctx,
+    'exact'
+  );
   return {
-    results: await executeHybridSearch(pool, auth, input, ctx, 'exact'),
+    results: exactResults.results,
     strategy: 'exact'
   };
 }
@@ -654,10 +717,16 @@ export function searchEntities(
       timings['embeddingMs'] = Date.now() - embeddingStartedAt;
 
       const hybridStartedAt = Date.now();
-      const results = await runHybridSearch(pool, auth, input, {
-        ...searchContext,
-        queryEmbedding
-      });
+      const results = await runHybridSearch(
+        pool,
+        auth,
+        input,
+        {
+          ...searchContext,
+          queryEmbedding
+        },
+        options.strategyOverride
+      );
       timings['hybridSqlMs'] = Date.now() - hybridStartedAt;
 
       const edgeStartedAt = Date.now();

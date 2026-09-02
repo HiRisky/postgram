@@ -45,7 +45,9 @@ function searchRow(id: string, content: string, score = 0.88) {
     updated_at: createdAt,
     chunk_content: content,
     similarity: 1,
-    score
+    score,
+    result_present: true,
+    candidate_count: 500
   };
 }
 
@@ -217,6 +219,33 @@ describe('searchEntities query embedding', () => {
     expect(
       queries.some((sql) => sql.includes('CROSS JOIN LATERAL'))
     ).toBe(false);
+    expect(
+      queries.some((sql) =>
+        sql.includes('(c.embedding <=> $1::vector) + 0')
+      )
+    ).toBe(true);
+  });
+
+  it('does not fall back when HNSW fills its candidate scan', async () => {
+    const { pool, queries } = makePool();
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0, limit: 2 },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    const hybridQueries = queries.filter((sql) =>
+      sql.includes('ROW_NUMBER() OVER')
+    );
+    expect(hybridQueries).toHaveLength(1);
+    expect(hybridQueries[0]).toContain('CROSS JOIN LATERAL');
   });
 
   it('uses HNSW for filtered candidate sets above the exact-search threshold', async () => {
@@ -369,7 +398,9 @@ describe('searchEntities graph expansion', () => {
                 updated_at: createdAt,
                 chunk_content: 'anchor compact search content',
                 similarity: 1,
-                score: 0.88
+                score: 0.88,
+                result_present: true,
+                candidate_count: 1
               }
             ]
           });
