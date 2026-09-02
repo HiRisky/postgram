@@ -25,7 +25,12 @@ describe('pgm REST client', () => {
     });
 
     const request = fetchMock.mock.calls[0]?.[1];
-    expect(JSON.parse(String(request?.body))).toMatchObject({
+    const requestBody = request?.body;
+    if (typeof requestBody !== 'string') {
+      throw new Error('expected a JSON request body');
+    }
+    const parsedBody: unknown = JSON.parse(requestBody);
+    expect(parsedBody).toMatchObject({
       query: 'compact retrieval',
       include_content: false
     });

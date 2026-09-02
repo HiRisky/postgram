@@ -71,14 +71,13 @@ function formatStoredEntity(entity: {
 
 function formatSearchResults(
   results: Array<{
-    entity: { id: string; type: string; content?: string | null };
+    entity: { id: string; type: string };
     score: number;
     chunk_content: string;
     related?: Array<{
       entity: {
         id: string;
         type: string;
-        content?: string | null;
         metadata: Record<string, unknown>;
       };
       relation: string;
@@ -96,12 +95,6 @@ function formatSearchResults(
       `${result.entity.type} ${shortId(result.entity.id)} score=${result.score.toFixed(3)}`
     );
     lines.push(`  ${result.chunk_content}`);
-    if (
-      result.entity.content &&
-      result.entity.content !== result.chunk_content
-    ) {
-      lines.push(`  entity: ${result.entity.content}`);
-    }
     if (result.related && result.related.length > 0) {
       lines.push(`  related (${result.related.length}):`);
       for (const rel of result.related) {

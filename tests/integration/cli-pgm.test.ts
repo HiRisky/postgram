@@ -924,10 +924,21 @@ describe('pgm CLI', () => {
     const requestBodies: Array<Record<string, unknown>> = [];
     const app = new Hono();
     app.post('/api/search', async (context) => {
-      requestBodies.push(
-        (await context.req.json()) as Record<string, unknown>
-      );
-      return context.json({ results: [] });
+      requestBodies.push(await context.req.json());
+      return context.json({
+        results: [
+          {
+            entity: {
+              id: '01234567-89ab-cdef-0123-456789abcdef',
+              type: 'document',
+              content: 'full entity content must stay hidden'
+            },
+            chunk_content: 'matched chunk',
+            similarity: 0.9,
+            score: 0.8
+          }
+        ]
+      });
     });
 
     let fakeBaseUrl = '';
@@ -949,6 +960,11 @@ describe('pgm CLI', () => {
         ['search', 'compact retrieval', '--json', '--full-response'],
         env
       );
+      const humanResult = await runPgm(['search', 'compact retrieval'], env);
+      expect(humanResult.stdout).toContain('matched chunk');
+      expect(humanResult.stdout).not.toContain(
+        'full entity content must stay hidden'
+      );
     } finally {
       await new Promise<void>((resolve, reject) => {
         fakeServer.close((error) => {
@@ -963,7 +979,8 @@ describe('pgm CLI', () => {
 
     expect(requestBodies.map((body) => body.include_content)).toEqual([
       false,
-      true
+      true,
+      false
     ]);
   }, 120_000);
 
