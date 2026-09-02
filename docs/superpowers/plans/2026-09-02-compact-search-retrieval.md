@@ -35,7 +35,7 @@
 **Interfaces:**
 
 - Consumes: existing `searchEntities(pool, auth, input, options)` callers.
-- Produces: `SearchInput.includeContent?: boolean`; omission means `true` for compatibility. `SearchResult.entity.content` and `SearchResult.related[].entity.content` become optional and are absent when hydration is disabled.
+- Produces: `SearchInput.includeContent?: boolean`; omission means `true` for compatibility. When hydration is disabled, the internal `Entity` shape keeps its stable nullable `content` field but SQL supplies `NULL` without reading the stored blob. Transports omit that field from compact responses.
 
 - [ ] **Step 1: Write the failing direct-service test**
 
@@ -88,9 +88,10 @@ it('omits entity and related content when hydration is disabled', async () => {
     ._unsafeUnwrap()
     .results.find((entry) => entry.entity.id === stored.id);
 
-  expect(compactHit?.chunkContent).toContain('compact retrieval marker');
-  expect(compactHit?.entity).not.toHaveProperty('content');
-  expect(compactHit?.related?.[0]?.entity).not.toHaveProperty('content');
+  expect(compactHit?.chunkContent).toEqual(expect.any(String));
+  expect(compactHit?.chunkContent.length).toBeGreaterThan(0);
+  expect(compactHit?.entity.content).toBeNull();
+  expect(compactHit?.related?.[0]?.entity.content).toBeNull();
 
   const legacy = await searchEntities(
     database.pool,
@@ -123,38 +124,9 @@ npm test -- tests/integration/search-service.test.ts -t "omits entity and relate
 
 Expected: TypeScript or runtime failure because `includeContent` is not supported and content is still present.
 
-- [ ] **Step 3: Add an optional search entity shape**
+- [ ] **Step 3: Add the service hydration input**
 
-In `src/services/search-service.ts`, export an entity shape that represents deliberate non-hydration without pretending the stored value is `null`:
-
-```ts
-export type SearchEntity = Omit<Entity, 'content'> & {
-  content?: string | null;
-};
-
-export type SearchResult = {
-  entity: SearchEntity;
-  entityId: string;
-  chunkContent: string;
-  similarity: number;
-  score: number;
-  edges?: SearchEdgeSummary | undefined;
-  related?:
-    | Array<{
-        entity: {
-          id: string;
-          type: string;
-          content?: string | null;
-          metadata: Record<string, unknown>;
-        };
-        relation: string;
-        direction: 'outgoing' | 'incoming';
-      }>
-    | undefined;
-};
-```
-
-Add `includeContent?: boolean | undefined` to `SearchInput`.
+Add `includeContent?: boolean | undefined` to `SearchInput`. Keep `SearchResult.entity` typed as `Entity`: the service uses `null` as its internal non-hydrated value, while transports own field omission.
 
 - [ ] **Step 4: Stop projecting result content when it is not requested**
 
@@ -165,7 +137,9 @@ function buildHybridSearchSql(
   candidateSql: string,
   includeContent: boolean
 ): string {
-  const contentProjection = includeContent ? ', e.content' : '';
+  const contentProjection = includeContent
+    ? 'e.content'
+    : 'NULL::text AS content';
 ```
 
 Inside the existing final `SELECT`, replace only `e.*` with these explicit columns. Leave the surrounding CTEs, joins, and ordering unchanged:
@@ -173,6 +147,7 @@ Inside the existing final `SELECT`, replace only `e.*` with these explicit colum
 ```sql
       e.id,
       e.type,
+      ${contentProjection},
       e.visibility,
       e.owner,
       e.status,
@@ -182,28 +157,10 @@ Inside the existing final `SELECT`, replace only `e.*` with these explicit colum
       e.source,
       e.metadata,
       e.created_at,
-      e.updated_at${contentProjection},
+      e.updated_at,
 ```
 
-Pass `input.includeContent ?? true` from `executeHybridSearch`. Update `EntityRow.content` and `mapEntity` so the returned object includes `content` only when the row has that property:
-
-```ts
-const entity: SearchEntity = {
-  id: row.id,
-  type: row.type,
-  visibility: row.visibility,
-  owner: row.owner,
-  status: row.status,
-  enrichmentStatus: row.enrichment_status,
-  version: row.version,
-  tags: row.tags,
-  source: row.source,
-  metadata: row.metadata,
-  createdAt: row.created_at.toISOString(),
-  updatedAt: row.updated_at.toISOString(),
-  ...('content' in row ? { content: row.content } : {})
-};
-```
+Pass `input.includeContent ?? true` from `executeHybridSearch`. Keep `EntityRow`, `SearchResult`, and `mapEntity` unchanged.
 
 Keep candidate selection and scoring SQL byte-for-byte unchanged.
 
@@ -212,10 +169,8 @@ Keep candidate selection and scoring SQL byte-for-byte unchanged.
 Build the neighbor projection from trusted constants, not user input:
 
 ```ts
-const neighborProjection =
-  (input.includeContent ?? true)
-    ? 'id, type, content, metadata'
-    : 'id, type, metadata';
+const neighborContentProjection =
+  (input.includeContent ?? true) ? 'content' : 'NULL::text AS content';
 ```
 
 Change the existing query's first line from:
@@ -227,10 +182,10 @@ SELECT id, type, content, metadata FROM entities
 to:
 
 ```ts
-`SELECT ${neighborProjection} FROM entities
+`SELECT id, type, ${neighborContentProjection}, metadata FROM entities
 ```
 
-Keep all existing neighbor authorization predicates and query values unchanged. Change the neighbor row type to `content?: string | null`, then map neighbor entities with conditional object spread so `content` is absent rather than `null` when not selected.
+Keep all existing neighbor authorization predicates, row types, mapping, and query values unchanged.
 
 - [ ] **Step 6: Run focused tests and typecheck**
 
@@ -326,7 +281,7 @@ include_content: z.boolean().optional();
 Pass `includeContent: body.include_content ?? true` to `searchEntities`. Add a search-specific serializer that preserves the legacy entity shape while omitting only `content` when requested:
 
 ```ts
-function toSearchStoredEntity(entity: SearchEntity, includeContent: boolean) {
+function toSearchStoredEntity(entity: Entity, includeContent: boolean) {
   return {
     id: entity.id,
     type: entity.type,
