@@ -3,7 +3,7 @@ export type FullSearchResponse = {
     entity: {
       id: string;
       type: string;
-      content: string | null;
+      content?: string | null;
       tags?: string[];
     };
     chunk_content: string;
@@ -13,7 +13,7 @@ export type FullSearchResponse = {
       entity: {
         id: string;
         type: string;
-        content: string | null;
+        content?: string | null;
       };
       relation: string;
       direction: string;
@@ -110,7 +110,7 @@ export type CompactSearchResult = {
   id: string;
   type: string;
   score: number;
-  content: string | null;
+  content?: string | null;
   chunk: string;
   tags?: string[];
   edges?: CompactSearchEdgeSummary;
@@ -127,7 +127,7 @@ type CompactRelatedResult = {
   type: string;
   relation: string;
   direction: string;
-  content: string | null;
+  content?: string | null;
 };
 
 export function compactStoredEntity(
@@ -208,7 +208,9 @@ export function compactSearchResponse(
       id: entry.entity.id,
       type: entry.entity.type,
       score: entry.score,
-      content: entry.entity.content,
+      ...(entry.entity.content !== undefined
+        ? { content: entry.entity.content }
+        : {}),
       chunk: entry.chunk_content,
       ...(entry.entity.tags?.length ? { tags: entry.entity.tags } : {}),
       ...(entry.edges ? { edges: entry.edges } : {}),
@@ -219,7 +221,9 @@ export function compactSearchResponse(
               type: related.entity.type,
               relation: related.relation,
               direction: related.direction,
-              content: related.entity.content
+              ...(related.entity.content !== undefined
+                ? { content: related.entity.content }
+                : {})
             }))
           }
         : {})

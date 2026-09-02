@@ -1036,6 +1036,33 @@ describe('REST entity endpoints', () => {
     const storedBody = (await storeResponse.json()) as {
       entity: { id: string };
     };
+    const neighborResponse = await app.request('/api/entities', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        type: 'project',
+        content: 'related postgres project content'
+      })
+    });
+    const neighborBody = (await neighborResponse.json()) as {
+      entity: { id: string };
+    };
+    const edgeResponse = await app.request('/api/edges', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        source_id: storedBody.entity.id,
+        target_id: neighborBody.entity.id,
+        relation: 'part_of'
+      })
+    });
+    expect(edgeResponse.status).toBe(201);
 
     const worker = createEnrichmentWorker({
       pool: database.pool,
@@ -1063,12 +1090,56 @@ describe('REST entity endpoints', () => {
 
     const firstResult = (searchBody as {
       results: Array<{
-        entity: { id: string };
+        entity: { id: string; content: string | null };
         chunk_content: string;
       }>;
     }).results[0];
     expect(firstResult?.entity.id).toBe(storedBody.entity.id);
+    expect(firstResult?.entity.content).toBe(
+      'postgres vector search for work notes'
+    );
     expect(firstResult?.chunk_content).toContain('postgres');
+
+    const compactResponse = await app.request('/api/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: 'postgres search',
+        type: 'memory',
+        tags: ['search'],
+        expand_graph: true,
+        include_content: false
+      })
+    });
+    const compactBody = (await compactResponse.json()) as {
+      results: Array<{
+        entity: Record<string, unknown>;
+        chunk_content: string;
+        related?: Array<{ entity: Record<string, unknown> }>;
+      }>;
+    };
+    expect(compactResponse.status).toBe(200);
+    expect(compactBody.results[0]?.chunk_content).toContain('postgres');
+    expect(compactBody.results[0]?.entity).not.toHaveProperty('content');
+    expect(compactBody.results[0]?.related?.[0]?.entity).not.toHaveProperty(
+      'content'
+    );
+
+    const invalidContentModeResponse = await app.request('/api/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: 'postgres search',
+        include_content: 'false'
+      })
+    });
+    expect(invalidContentModeResponse.status).toBe(400);
 
     const invalidResponse = await app.request('/api/search', {
       method: 'POST',

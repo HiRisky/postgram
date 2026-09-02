@@ -116,7 +116,8 @@ const searchEntitiesSchema = z.object({
   recency_weight: z.number().min(0).optional(),
   expand_graph: z.boolean().optional(),
   include_archived: z.boolean().optional(),
-  memory_role: memoryRoleSchema.optional()
+  memory_role: memoryRoleSchema.optional(),
+  include_content: z.boolean().optional()
 });
 
 const taskCreateSchema = z.object({
@@ -260,6 +261,28 @@ function toStoredEntity(entity: Entity) {
     metadata: entity.metadata,
     created_at: entity.createdAt,
     updated_at: entity.updatedAt
+  };
+}
+
+function toSearchStoredEntity(entity: Entity, includeContent: boolean) {
+  const storedEntity = toStoredEntity(entity);
+  if (includeContent) {
+    return storedEntity;
+  }
+
+  return {
+    id: storedEntity.id,
+    type: storedEntity.type,
+    visibility: storedEntity.visibility,
+    owner: storedEntity.owner,
+    status: storedEntity.status,
+    enrichment_status: storedEntity.enrichment_status,
+    version: storedEntity.version,
+    tags: storedEntity.tags,
+    source: storedEntity.source,
+    metadata: storedEntity.metadata,
+    created_at: storedEntity.created_at,
+    updated_at: storedEntity.updated_at
   };
 }
 
@@ -520,6 +543,7 @@ export function registerRestRoutes(
   app.post('/api/search', async (c) => {
     const auth = c.get('auth');
     const body = parseJsonBody(searchEntitiesSchema, await c.req.json());
+    const includeContent = body.include_content ?? true;
     const result = await searchEntities(
       pool,
       auth,
@@ -534,7 +558,8 @@ export function registerRestRoutes(
         recencyWeight: body.recency_weight,
         expandGraph: body.expand_graph,
         includeArchived: body.include_archived,
-        memoryRole: body.memory_role
+        memoryRole: body.memory_role,
+        includeContent
       },
       {
         embeddingService: options.embeddingService,
@@ -548,12 +573,27 @@ export function registerRestRoutes(
 
     return c.json({
       results: result.value.results.map((entry) => ({
-        entity: toStoredEntity(entry.entity),
+        entity: toSearchStoredEntity(entry.entity, includeContent),
         chunk_content: entry.chunkContent,
         similarity: entry.similarity,
         score: entry.score,
         ...(entry.edges ? { edges: entry.edges } : {}),
-        ...(entry.related ? { related: entry.related } : {})
+        ...(entry.related
+          ? {
+              related: entry.related.map((related) => ({
+                entity: {
+                  id: related.entity.id,
+                  type: related.entity.type,
+                  ...(includeContent
+                    ? { content: related.entity.content }
+                    : {}),
+                  metadata: related.entity.metadata
+                },
+                relation: related.relation,
+                direction: related.direction
+              }))
+            }
+          : {})
       }))
     });
   });
