@@ -586,7 +586,8 @@ Expected:
 - `embedding_calls` reports one call per sample for `cold_unique_queries` and
   zero for both cache-hit profiles — a cache that stopped working fails here
   even on a machine fast enough to meet the latency thresholds
-- The report includes a hybrid `EXPLAIN (ANALYZE, BUFFERS)` summary
+- The report includes a hybrid `EXPLAIN (ANALYZE, BUFFERS)` summary whose
+  `indexes` contain `idx_chunks_embedding`
 
 Resource:
 

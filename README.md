@@ -327,9 +327,11 @@ entities are retried up to 3 times with a 5-minute backoff.
 ### 3. Hybrid Search
 
 Search blends vector cosine similarity (60%) with BM25 keyword ranking (40%)
-transparently. Search requires a reachable embedding provider; if that provider
-is unavailable, writes still succeed but enrichment and search fail until it
-recovers. Results include:
+transparently. Broad searches select candidates through the HNSW index; small
+filtered sets use exact distance ranking, and HNSW falls back to exact ranking
+when it cannot fill the requested result set. Search requires a reachable
+embedding provider; if that provider is unavailable, writes still succeed but
+enrichment and search fail until it recovers. Results include:
 
 - ranked results with blended scores
 - similarity scores

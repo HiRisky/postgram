@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
-import type { Pool, QueryResult } from 'pg';
+import type { Pool, PoolClient, QueryResult } from 'pg';
 
 import type { AuthContext } from '../src/auth/types.js';
 import { createEmbeddingService } from '../src/services/embedding-service.js';
@@ -142,16 +142,37 @@ function captureSearchQueries(pool: Pool): {
 } {
   const captured: { hybrid?: CapturedQuery } = {};
   const counts = { total: 0 };
+  const capture = (text: string, values?: unknown[]): void => {
+    counts.total += 1;
+    if (text.includes('ROW_NUMBER() OVER')) {
+      captured.hybrid = { text, values: values ?? [] };
+    }
+  };
+  const instrumentClient = (client: PoolClient): PoolClient =>
+    new Proxy(client, {
+      get(target, property, receiver) {
+        if (property === 'query') {
+          return (text: string, values?: unknown[]) => {
+            capture(text, values);
+            return target.query(text, values);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function'
+          ? (value.bind(target) as unknown)
+          : value;
+      }
+    });
   const instrumented = new Proxy(pool, {
     get(target, property, receiver) {
       if (property === 'query') {
         return (text: string, values?: unknown[]) => {
-          counts.total += 1;
-          if (text.includes('ROW_NUMBER() OVER')) {
-            captured.hybrid = { text, values: values ?? [] };
-          }
+          capture(text, values);
           return target.query(text, values);
         };
+      }
+      if (property === 'connect') {
+        return async () => instrumentClient(await target.connect());
       }
       const value: unknown = Reflect.get(target, property, receiver);
       return typeof value === 'function'
@@ -222,30 +243,57 @@ async function runProfile(
   return [input.name, summarize(samples), { embeddingCalls }];
 }
 
+type ExplainPlanNode = {
+  'Node Type'?: string;
+  'Index Name'?: string;
+  'Shared Hit Blocks'?: number;
+  Plans?: ExplainPlanNode[];
+};
+
 type ExplainRow = {
   'QUERY PLAN'?: Array<{
     'Planning Time'?: number;
     'Execution Time'?: number;
-    Plan?: { 'Node Type'?: string; 'Shared Hit Blocks'?: number };
+    Plan?: ExplainPlanNode;
   }>;
 };
 
-function summarizeExplain(
-  result: QueryResult<ExplainRow>
-): Record<string, unknown> {
+type ExplainSummary = {
+  planning_ms: number | null;
+  execution_ms: number | null;
+  root_node: string | null;
+  shared_hit_blocks: number | null;
+  indexes: string[];
+};
+
+function collectIndexes(
+  node: ExplainPlanNode | undefined,
+  indexes: Set<string>
+): void {
+  if (!node) return;
+  if (node['Index Name']) indexes.add(node['Index Name']);
+  for (const child of node.Plans ?? []) {
+    collectIndexes(child, indexes);
+  }
+}
+
+function summarizeExplain(result: QueryResult<ExplainRow>): ExplainSummary {
   const plan = result.rows[0]?.['QUERY PLAN']?.[0];
+  const indexes = new Set<string>();
+  collectIndexes(plan?.Plan, indexes);
   return {
     planning_ms: plan?.['Planning Time'] ?? null,
     execution_ms: plan?.['Execution Time'] ?? null,
     root_node: plan?.Plan?.['Node Type'] ?? null,
-    shared_hit_blocks: plan?.Plan?.['Shared Hit Blocks'] ?? null
+    shared_hit_blocks: plan?.Plan?.['Shared Hit Blocks'] ?? null,
+    indexes: Array.from(indexes).sort()
   };
 }
 
 async function explain(
   pool: Pool,
   query: CapturedQuery | undefined
-): Promise<Record<string, unknown> | null> {
+): Promise<ExplainSummary | null> {
   if (!query) return null;
   const result = await pool.query<ExplainRow>(
     `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query.text}`,
@@ -283,6 +331,7 @@ try {
     runs.map(([name, , stats]) => [name, stats.embeddingCalls])
   ) as Record<string, number>;
 
+  const hybridExplain = await explain(database.pool, captured.hybrid);
   report = {
     dataset: { entities: ENTITY_COUNT, chunks: CHUNK_COUNT },
     samples: SAMPLE_RUNS,
@@ -290,10 +339,14 @@ try {
     profiles,
     embedding_calls: embeddingCalls,
     database_queries: counts.total,
-    explain: { hybrid: await explain(database.pool, captured.hybrid) }
+    explain: { hybrid: hybridExplain }
   };
 
   if (process.argv.includes('--assert')) {
+    if (!hybridExplain?.indexes.includes('idx_chunks_embedding')) {
+      throw new Error('hybrid search plan did not use idx_chunks_embedding');
+    }
+
     const maxP95: Record<string, number> = {
       // One provider round trip plus SQL.
       cold_unique_queries: EMBEDDING_CALL_DELAY_MS + 150,

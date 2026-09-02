@@ -79,26 +79,57 @@ describe('buildSearchEdgeSummaries', () => {
 });
 
 describe('searchEntities query embedding', () => {
-  function makePool() {
+  function makePool(
+    options: { chunkCount?: string; iterativeScanSupported?: boolean } = {}
+  ) {
+    const chunkCount = options.chunkCount ?? '42';
+    const iterativeScanSupported = options.iterativeScanSupported ?? true;
     const queries: string[] = [];
-    const pool = {
-      query: (sql: string) => {
-        queries.push(sql);
-        if (sql.includes('FROM chunks c')) {
-          return Promise.resolve({
-            rows: [
-              searchRow(
-                '00000000-0000-0000-0000-000000000011',
-                'hybrid result'
-              )
-            ]
-          });
+    const query = (sql: string) => {
+      queries.push(sql);
+      if (sql.includes('SET LOCAL hnsw.iterative_scan')) {
+        if (!iterativeScanSupported) {
+          return Promise.reject(
+            Object.assign(new Error('unrecognized configuration parameter'), {
+              code: '42704'
+            })
+          );
         }
-        if (sql.includes('FROM unnest($1::uuid[]) AS anchor')) {
-          return Promise.resolve({ rows: [] });
-        }
-        throw new Error(`Unexpected query: ${sql}`);
+        return Promise.resolve({ rows: [] });
       }
+      if (
+        sql === 'BEGIN' ||
+        sql === 'COMMIT' ||
+        sql === 'ROLLBACK' ||
+        sql.includes("SELECT '[0]'::vector")
+      ) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('count(*)::text AS chunk_count')) {
+        return Promise.resolve({ rows: [{ chunk_count: chunkCount }] });
+      }
+      if (sql.includes('FROM chunks c')) {
+        return Promise.resolve({
+          rows: [
+            searchRow(
+              '00000000-0000-0000-0000-000000000011',
+              'hybrid result'
+            )
+          ]
+        });
+      }
+      if (sql.includes('FROM unnest($1::uuid[]) AS anchor')) {
+        return Promise.resolve({ rows: [] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    };
+    const client = {
+      query,
+      release: vi.fn()
+    };
+    const pool = {
+      query,
+      connect: () => Promise.resolve(client)
     };
     return { pool: pool as never, queries };
   }
@@ -135,6 +166,109 @@ describe('searchEntities query embedding', () => {
     expect(queries.some((sql) => sql.includes('search_tsvector @@'))).toBe(
       false
     );
+  });
+
+  it('uses HNSW-first candidates with transaction-local iterative scan for broad searches', async () => {
+    const { pool, queries } = makePool();
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0, limit: 1 },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('SET LOCAL hnsw.iterative_scan'))
+    ).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('CROSS JOIN LATERAL'))
+    ).toBe(true);
+  });
+
+  it('counts and searches small filtered candidate sets exactly', async () => {
+    const { pool, queries } = makePool();
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      {
+        query: 'postgres search',
+        type: 'memory',
+        threshold: 0,
+        limit: 1
+      },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('count(*)::text AS chunk_count'))
+    ).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('CROSS JOIN LATERAL'))
+    ).toBe(false);
+  });
+
+  it('uses HNSW for filtered candidate sets above the exact-search threshold', async () => {
+    const { pool, queries } = makePool({ chunkCount: '5001' });
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      {
+        query: 'postgres search',
+        type: 'document',
+        threshold: 0,
+        limit: 1
+      },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('CROSS JOIN LATERAL'))
+    ).toBe(true);
+  });
+
+  it('falls back to exact search when iterative HNSW scans are unavailable', async () => {
+    const { pool, queries } = makePool({ iterativeScanSupported: false });
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0, limit: 1 },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(
+      queries.some((sql) => sql.includes('SET LOCAL hnsw.iterative_scan'))
+    ).toBe(true);
+    expect(
+      queries.some(
+        (sql) =>
+          sql.includes('ROW_NUMBER() OVER') &&
+          !sql.includes('CROSS JOIN LATERAL')
+      )
+    ).toBe(true);
   });
 
   it('passes the pool through so the embedding can be cached in Postgres', async () => {
@@ -212,6 +346,10 @@ describe('searchEntities graph expansion', () => {
       query: (sql: string) => {
         queries.push(sql);
 
+        if (sql.includes('count(*)::text AS chunk_count')) {
+          return Promise.resolve({ rows: [{ chunk_count: '1' }] });
+        }
+
         if (sql.includes('FROM chunks c')) {
           return Promise.resolve({
             rows: [
@@ -287,6 +425,7 @@ describe('searchEntities graph expansion', () => {
       searchAuth,
       {
         query: 'compact search',
+        type: 'memory',
         threshold: 0,
         expandGraph: true
       },
