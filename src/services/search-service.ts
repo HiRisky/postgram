@@ -446,23 +446,27 @@ async function countFilteredChunks(
 ): Promise<number> {
   const rows = await pool.query<{ chunk_count: string }>(
     `SELECT count(*)::text AS chunk_count
-     FROM chunks c
-     JOIN entities e ON e.id = c.entity_id
-     WHERE ($1::boolean = true OR e.status IS DISTINCT FROM 'archived')
-       AND ($2::text IS NULL OR e.type = $2)
-       AND ($3::text[] IS NULL OR e.tags @> $3)
-       AND ($4::text[] IS NULL OR e.type = ANY($4))
-       AND e.visibility = ANY($5)
-       AND ($6::text IS NULL OR e.visibility = $6)
-       AND ${ownerSqlCondition('e.owner', '$7')}
-       AND (
-         $8::text IS NULL
-         OR (
-           e.type = 'memory'
-           AND COALESCE(e.metadata->>'memory_role', 'durable_memory') = $8
+     FROM (
+       SELECT 1
+       FROM chunks c
+       JOIN entities e ON e.id = c.entity_id
+       WHERE ($1::boolean = true OR e.status IS DISTINCT FROM 'archived')
+         AND ($2::text IS NULL OR e.type = $2)
+         AND ($3::text[] IS NULL OR e.tags @> $3)
+         AND ($4::text[] IS NULL OR e.type = ANY($4))
+         AND e.visibility = ANY($5)
+         AND ($6::text IS NULL OR e.visibility = $6)
+         AND ${ownerSqlCondition('e.owner', '$7')}
+         AND (
+           $8::text IS NULL
+           OR (
+             e.type = 'memory'
+             AND COALESCE(e.metadata->>'memory_role', 'durable_memory') = $8
+           )
          )
-       )
-       AND ${scopedMemoryVisibilitySql('e.metadata', '$9')}`,
+         AND ${scopedMemoryVisibilitySql('e.metadata', '$9')}
+       LIMIT $10
+     ) matching_chunks`,
     [
       input.includeArchived ?? false,
       input.type ?? null,
@@ -472,7 +476,8 @@ async function countFilteredChunks(
       input.visibility ?? null,
       input.owner ?? null,
       input.memoryRole ?? null,
-      auth.clientId
+      auth.clientId,
+      EXACT_SEARCH_MAX_CHUNKS + 1
     ]
   );
   return Number(rows.rows[0]?.chunk_count ?? '0');

@@ -214,7 +214,11 @@ describe('searchEntities query embedding', () => {
 
     expect(result.isOk()).toBe(true);
     expect(
-      queries.some((sql) => sql.includes('count(*)::text AS chunk_count'))
+      queries.some(
+        (sql) =>
+          sql.includes('count(*)::text AS chunk_count') &&
+          sql.includes('LIMIT $10')
+      )
     ).toBe(true);
     expect(
       queries.some((sql) => sql.includes('CROSS JOIN LATERAL'))
