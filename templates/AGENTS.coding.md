@@ -36,10 +36,12 @@ mcp__postgram__search {
 
 MCP output is compact by default for token-heavy tools such as search, task
 lists, graph expansion, write acknowledgements, and link acknowledgements. Keep
-that default for normal session-start searches. Add `"full_response": true`
-only when you need metadata, timestamps, version, or raw similarity; use
-`"toon": true` on list-like tools (`search`, `task_list`, `expand`) when you
-want the smallest readable output.
+that default for normal session-start searches. Search returns ranked matched
+chunks without complete entity content; recall a selected ID when you need its
+full context. Add `"full_response": true` only when a machine consumer needs
+the complete legacy envelope, including metadata, timestamps, version, and raw
+similarity. Use `"toon": true` on list-like tools (`search`, `task_list`,
+`expand`) when you want the smallest readable output.
 
 Durable-memory search is conditional, but use strong triggers. Search durable
 memory before choosing an approach or asking the user for historical context

@@ -670,7 +670,8 @@ git commit -m "feat(cli): default search to matched chunks"
 - Modify: `cli/README.md`
 - Modify: `templates/AGENTS.md`
 - Modify: `templates/CLAUDE.md`
-- Modify: `docs/optimized-system-profile.md`
+- Modify: `templates/AGENTS.coding.md`
+- Modify: `templates/CLAUDE.coding.md`
 
 **Interfaces:**
 
@@ -715,7 +716,7 @@ Update the MCP compact-output section with the same search-to-recall guidance.
 
 - [ ] **Step 3: Update bundled agent templates**
 
-In `templates/AGENTS.md`, `templates/CLAUDE.md`, and `docs/optimized-system-profile.md`, replace guidance that implies compact search contains complete stored content with:
+In `templates/AGENTS.md`, `templates/CLAUDE.md`, `templates/AGENTS.coding.md`, and `templates/CLAUDE.coding.md`, replace guidance that implies compact search contains complete stored content with:
 
 ```markdown
 Use search to rank compact matched chunks. Recall a selected entity by ID when
@@ -731,7 +732,8 @@ Run:
 ```bash
 rg -n "search.*recall|full.response|include_content|matched chunk" \
   README.md cli/README.md skill/postgram/SKILL.md \
-  templates/AGENTS.md templates/CLAUDE.md docs/optimized-system-profile.md
+  templates/AGENTS.md templates/CLAUDE.md \
+  templates/AGENTS.coding.md templates/CLAUDE.coding.md
 npm run lint
 npm run typecheck
 npm test
@@ -767,7 +769,7 @@ Expected:
 - [ ] **Step 6: Commit documentation**
 
 ```bash
-git add README.md cli/README.md skill/postgram/SKILL.md templates/AGENTS.md templates/CLAUDE.md docs/optimized-system-profile.md
+git add README.md cli/README.md skill/postgram/SKILL.md templates/AGENTS.md templates/CLAUDE.md templates/AGENTS.coding.md templates/CLAUDE.coding.md
 git commit -m "docs(search): document progressive content retrieval"
 ```
 
