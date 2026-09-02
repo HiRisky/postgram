@@ -15,7 +15,7 @@ function stripFrontmatter(text: string): string {
  * id prefix.
  */
 export function entityTitle(entity: Entity, max = 80): string {
-  const meta = (entity.metadata ?? {}) as Record<string, unknown>;
+  const meta = entity.metadata;
   const metaCandidates = ['title', 'name', 'path', 'summary'];
   for (const key of metaCandidates) {
     const v = meta[key];

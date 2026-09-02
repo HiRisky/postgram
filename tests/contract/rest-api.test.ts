@@ -993,18 +993,16 @@ describe('REST entity endpoints', () => {
 
     expect(response.status).toBe(200);
     expect(body.archived).toEqual([{ id: archived.entity.id }]);
-    expect(body.failed).toEqual([
-      {
-        id: missingId,
-        code: ErrorCode.NOT_FOUND,
-        message: 'Entity not found'
-      },
-      expect.objectContaining({
-        id: inaccessible.entity.id,
-        code: ErrorCode.FORBIDDEN,
-        message: expect.any(String)
-      })
-    ]);
+    expect(body.failed[0]).toEqual({
+      id: missingId,
+      code: ErrorCode.NOT_FOUND,
+      message: 'Entity not found'
+    });
+    expect(body.failed[1]).toMatchObject({
+      id: inaccessible.entity.id,
+      code: ErrorCode.FORBIDDEN
+    });
+    expect(body.failed[1]?.message.length).toBeGreaterThan(0);
 
     const rows = await database.pool.query<{ id: string; status: string | null }>(
       'SELECT id, status FROM entities WHERE id = ANY($1)',

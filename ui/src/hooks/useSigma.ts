@@ -213,11 +213,11 @@ export function useSigma(
   }, [graph]);
 
   const zoomIn = useCallback(() => {
-    sigmaRef.current?.getCamera().animatedZoom({ duration: 300 });
+    void sigmaRef.current?.getCamera().animatedZoom({ duration: 300 });
   }, []);
 
   const zoomOut = useCallback(() => {
-    sigmaRef.current?.getCamera().animatedUnzoom({ duration: 300 });
+    void sigmaRef.current?.getCamera().animatedUnzoom({ duration: 300 });
   }, []);
 
   const focusNode = useCallback((nodeId: string, g: Graph) => {
@@ -225,7 +225,7 @@ export function useSigma(
     if (!sigma || !g.hasNode(nodeId)) return;
     const nodePosition = sigma.getNodeDisplayData(nodeId);
     if (nodePosition) {
-      sigma.getCamera().animate(
+      void sigma.getCamera().animate(
         { x: nodePosition.x, y: nodePosition.y, ratio: 0.15 },
         { duration: 500 }
       );

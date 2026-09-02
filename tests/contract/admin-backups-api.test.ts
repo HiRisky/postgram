@@ -453,9 +453,12 @@ describe('admin backup API', () => {
         pool: database.pool,
         runtimeConfig,
         adminBackupCommandRunner: commandRunner,
-        adminBackupRestoreVerifier: async () => {
+        adminBackupRestoreVerifier: () => {
           verifierCalls += 1;
-          return { migrations: 'passed', health: 'connected' };
+          return Promise.resolve({
+            migrations: 'passed',
+            health: 'connected'
+          });
         }
       });
       const formData = new FormData();
@@ -554,13 +557,13 @@ describe('admin backup API', () => {
       pool: database.pool,
       runtimeConfig,
       adminBackupCommandRunner: commandRunner,
-      adminBackupRestoreVerifier: async () => {
+      adminBackupRestoreVerifier: () => {
         verifierCalls += 1;
         stageEvents.push('verify');
-        return {
+        return Promise.resolve({
           migrations: 'passed',
           health: 'connected'
-        };
+        });
       }
     });
     const formData = new FormData();

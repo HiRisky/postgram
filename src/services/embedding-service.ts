@@ -7,6 +7,7 @@ import type { EmbeddingProvider } from './embeddings/providers.js';
 
 const DEFAULT_DIMENSIONS = 1536;
 const QUERY_EMBEDDING_CACHE_SIZE = 512;
+const QUERY_EMBEDDING_CACHE_MAX_ENTRIES_PER_SCOPE = 2_000;
 const ACTIVE_MODEL_TTL_MS = 60 * 1000;
 
 type EmbeddingMode = 'deterministic' | 'provider';
@@ -200,14 +201,35 @@ export function sqlToVector(value: unknown): number[] | null {
  */
 export async function pruneQueryEmbeddingCache(
   pool: Pool,
-  maxAgeDays: number
+  maxAgeDays: number,
+  maxEntriesPerScope = QUERY_EMBEDDING_CACHE_MAX_ENTRIES_PER_SCOPE
 ): Promise<number> {
-  const result = await pool.query(
+  const expired = await pool.query(
     `DELETE FROM query_embedding_cache
      WHERE created_at < now() - ($1::integer * interval '1 day')`,
     [maxAgeDays]
   );
-  return result.rowCount ?? 0;
+  const overflow = await pool.query(
+    `WITH ranked AS MATERIALIZED (
+       SELECT
+         client_id,
+         model_id,
+         query_hash,
+         ROW_NUMBER() OVER (
+           PARTITION BY client_id
+           ORDER BY created_at DESC, model_id, query_hash
+         ) AS entry_rank
+       FROM query_embedding_cache
+     )
+     DELETE FROM query_embedding_cache AS cached
+     USING ranked
+     WHERE ranked.entry_rank > $1::integer
+       AND cached.client_id = ranked.client_id
+       AND cached.model_id = ranked.model_id
+       AND cached.query_hash = ranked.query_hash`,
+    [maxEntriesPerScope]
+  );
+  return (expired.rowCount ?? 0) + (overflow.rowCount ?? 0);
 }
 
 export function createEmbeddingService(options: EmbeddingServiceOptions = {}) {

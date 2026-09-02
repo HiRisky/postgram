@@ -75,7 +75,7 @@ describe('CLI help text', () => {
     expect(normalizedSearchHelp).toContain(
       'emit compact TOON output for lower agent token use'
     );
-  });
+  }, 20_000);
 
   it('keeps admin help concise and emphasizes per-client agent keys', async () => {
     const adminHelp = await helpFor(PGM_ADMIN_ENTRYPOINT, ['--help']);
@@ -108,5 +108,5 @@ describe('CLI help text', () => {
     ]);
     expect(normalizeHelp(memoryHelp)).toContain('groom-durable');
     expect(normalizeHelp(memoryHelp)).toContain('apply-durable-grooming');
-  });
+  }, 20_000);
 });

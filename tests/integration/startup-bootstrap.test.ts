@@ -1,6 +1,8 @@
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as PoolModule from '../../src/db/pool.js';
+
 import { ensureFirstRunBootstrapToken } from '../../src/auth/admin-service.js';
 import {
   createTestDatabase,
@@ -13,7 +15,7 @@ const startupMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../src/db/pool.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/db/pool.js')>();
+  const actual = await importOriginal<typeof PoolModule>();
   return {
     ...actual,
     createPool: () => {

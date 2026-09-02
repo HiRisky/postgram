@@ -564,7 +564,8 @@ Latency:
   time — repeat the same query twice and confirm the second call is markedly
   faster than the first
 - Restart the server and repeat that query again: it should still be fast,
-  because the cache lives in `query_embedding_cache` rather than in memory
+  because the cache lives in `query_embedding_cache` rather than in memory;
+  the hourly prune retains the 2,000 most recent queries per client
 - A search whose embedding is not cached costs one provider round trip, bounded
   by `EMBEDDING_TIMEOUT_MS`
 - If the embedding provider fails or times out, search returns an
@@ -585,7 +586,9 @@ Expected:
 - `embedding_calls` reports one call per sample for `cold_unique_queries` and
   zero for both cache-hit profiles — a cache that stopped working fails here
   even on a machine fast enough to meet the latency thresholds
-- The report includes a hybrid `EXPLAIN (ANALYZE, BUFFERS)` summary
+- The report includes HNSW and exact `EXPLAIN (ANALYZE, BUFFERS)` summaries:
+  HNSW uses `idx_chunks_embedding`, exact search does not, and measured HNSW
+  recall against exact ground truth is at least 0.80
 
 Resource:
 

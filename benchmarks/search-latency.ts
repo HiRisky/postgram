@@ -1,6 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
-import type { Pool, QueryResult } from 'pg';
+import type { Pool, PoolClient, QueryResult } from 'pg';
 
 import type { AuthContext } from '../src/auth/types.js';
 import { createEmbeddingService } from '../src/services/embedding-service.js';
@@ -78,7 +78,7 @@ async function seed(pool: Pool): Promise<void> {
         END,
         'active',
         'completed',
-        ARRAY['benchmark'],
+        ARRAY['benchmark', 'bucket-' || (value % 10)],
         '{}'::jsonb,
         now() - (value || ' minutes')::interval,
         now()
@@ -101,10 +101,20 @@ async function seed(pool: Pool): Promise<void> {
         e.id,
         0,
         left(e.content, 500),
-        array_fill(0.01::real, ARRAY[1536])::vector,
+        (
+          ARRAY[
+            ((e.value % 17) + 1)::real / 17,
+            ((e.value % 31) + 1)::real / 31
+          ]::real[] || array_fill(0.01::real, ARRAY[1534])
+        )::vector,
         (SELECT id FROM embedding_models WHERE is_active = true),
         100
-      FROM entities e
+      FROM (
+        SELECT
+          entities.*,
+          row_number() OVER (ORDER BY id) AS value
+        FROM entities
+      ) e
     `
   );
 
@@ -122,10 +132,20 @@ async function seed(pool: Pool): Promise<void> {
         e.id,
         1,
         right(e.content, 500),
-        array_fill(0.011::real, ARRAY[1536])::vector,
+        (
+          ARRAY[
+            ((e.value % 19) + 1)::real / 19,
+            ((e.value % 29) + 1)::real / 29
+          ]::real[] || array_fill(0.011::real, ARRAY[1534])
+        )::vector,
         (SELECT id FROM embedding_models WHERE is_active = true),
         100
-      FROM entities e
+      FROM (
+        SELECT
+          entities.*,
+          row_number() OVER (ORDER BY id) AS value
+        FROM entities
+      ) e
       ORDER BY e.id
       LIMIT $1
     `,
@@ -137,21 +157,43 @@ async function seed(pool: Pool): Promise<void> {
 
 function captureSearchQueries(pool: Pool): {
   pool: Pool;
-  captured: { hybrid?: CapturedQuery };
+  captured: { exact?: CapturedQuery; hnsw?: CapturedQuery };
   counts: { total: number };
 } {
-  const captured: { hybrid?: CapturedQuery } = {};
+  const captured: { exact?: CapturedQuery; hnsw?: CapturedQuery } = {};
   const counts = { total: 0 };
+  const capture = (text: string, values?: unknown[]): void => {
+    counts.total += 1;
+    if (text.includes('ROW_NUMBER() OVER')) {
+      const strategy = text.includes('CROSS JOIN LATERAL') ? 'hnsw' : 'exact';
+      captured[strategy] = { text, values: values ?? [] };
+    }
+  };
+  const instrumentClient = (client: PoolClient): PoolClient =>
+    new Proxy(client, {
+      get(target, property, receiver) {
+        if (property === 'query') {
+          return (text: string, values?: unknown[]) => {
+            capture(text, values);
+            return target.query(text, values);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function'
+          ? (value.bind(target) as unknown)
+          : value;
+      }
+    });
   const instrumented = new Proxy(pool, {
     get(target, property, receiver) {
       if (property === 'query') {
         return (text: string, values?: unknown[]) => {
-          counts.total += 1;
-          if (text.includes('ROW_NUMBER() OVER')) {
-            captured.hybrid = { text, values: values ?? [] };
-          }
+          capture(text, values);
           return target.query(text, values);
         };
+      }
+      if (property === 'connect') {
+        return async () => instrumentClient(await target.connect());
       }
       const value: unknown = Reflect.get(target, property, receiver);
       return typeof value === 'function'
@@ -172,6 +214,13 @@ function captureSearchQueries(pool: Pool): {
  */
 const EMBEDDING_CALL_DELAY_MS = 250;
 
+function benchmarkVector(): number[] {
+  const vector = new Array<number>(1536).fill(0.01);
+  vector[0] = 1;
+  vector[1] = 0.5;
+  return vector;
+}
+
 async function runProfile(
   pool: Pool,
   input: {
@@ -182,7 +231,7 @@ async function runProfile(
     freshServicePerRun?: boolean;
   }
 ): Promise<[string, Profile, { embeddingCalls: number }]> {
-  const vector = new Array<number>(1536).fill(0.01);
+  const vector = benchmarkVector();
   let embeddingCalls = 0;
   const embedQuery = async () => {
     embeddingCalls += 1;
@@ -222,30 +271,105 @@ async function runProfile(
   return [input.name, summarize(samples), { embeddingCalls }];
 }
 
+type RecallProfile = {
+  exact_results: number;
+  hnsw_results: number;
+  hnsw_strategy: string | null;
+  overlap: number;
+  recall: number;
+};
+
+async function measureRecall(pool: Pool): Promise<RecallProfile> {
+  const embeddingService = createEmbeddingService({
+    embedQuery: () => Promise.resolve(benchmarkVector())
+  });
+  const input = {
+    query: 'postgres search latency benchmark entity 42',
+    limit: 10,
+    threshold: 0
+  };
+  const exact = await searchEntities(pool, auth, input, {
+    embeddingService,
+    strategyOverride: 'exact'
+  });
+  if (exact.isErr()) throw exact.error;
+  let hnswStrategy: string | null = null;
+  const hnsw = await searchEntities(pool, auth, input, {
+    embeddingService,
+    strategyOverride: 'hnsw',
+    onStrategy: (strategy) => {
+      hnswStrategy = strategy;
+    }
+  });
+  if (hnsw.isErr()) throw hnsw.error;
+
+  const exactIds = new Set(
+    exact.value.results.map((result) => result.entityId)
+  );
+  const hnswIds = new Set(
+    hnsw.value.results.map((result) => result.entityId)
+  );
+  const overlap = Array.from(exactIds).filter((id) => hnswIds.has(id)).length;
+  return {
+    exact_results: exactIds.size,
+    hnsw_results: hnswIds.size,
+    hnsw_strategy: hnswStrategy,
+    overlap,
+    recall: exactIds.size === 0 ? 1 : overlap / exactIds.size
+  };
+}
+
+type ExplainPlanNode = {
+  'Node Type'?: string;
+  'Index Name'?: string;
+  'Shared Hit Blocks'?: number;
+  Plans?: ExplainPlanNode[];
+};
+
 type ExplainRow = {
   'QUERY PLAN'?: Array<{
     'Planning Time'?: number;
     'Execution Time'?: number;
-    Plan?: { 'Node Type'?: string; 'Shared Hit Blocks'?: number };
+    Plan?: ExplainPlanNode;
   }>;
 };
 
-function summarizeExplain(
-  result: QueryResult<ExplainRow>
-): Record<string, unknown> {
+type ExplainSummary = {
+  planning_ms: number | null;
+  execution_ms: number | null;
+  root_node: string | null;
+  shared_hit_blocks: number | null;
+  indexes: string[];
+};
+
+function collectIndexes(
+  node: ExplainPlanNode | undefined,
+  indexes: Set<string>
+): void {
+  if (!node) return;
+  if (node['Index Name']) indexes.add(node['Index Name']);
+  for (const child of node.Plans ?? []) {
+    collectIndexes(child, indexes);
+  }
+}
+
+function summarizeExplain(result: QueryResult<ExplainRow>): ExplainSummary {
   const plan = result.rows[0]?.['QUERY PLAN']?.[0];
+  const indexes = new Set<string>();
+  collectIndexes(plan?.Plan, indexes);
   return {
     planning_ms: plan?.['Planning Time'] ?? null,
     execution_ms: plan?.['Execution Time'] ?? null,
     root_node: plan?.Plan?.['Node Type'] ?? null,
-    shared_hit_blocks: plan?.Plan?.['Shared Hit Blocks'] ?? null
+    shared_hit_blocks: plan?.Plan?.['Shared Hit Blocks'] ?? null,
+    indexes: Array.from(indexes).sort()
   };
 }
 
 async function explain(
   pool: Pool,
   query: CapturedQuery | undefined
-): Promise<Record<string, unknown> | null> {
+): Promise<ExplainSummary | null> {
   if (!query) return null;
   const result = await pool.query<ExplainRow>(
     `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query.text}`,
@@ -283,6 +407,9 @@ try {
     runs.map(([name, , stats]) => [name, stats.embeddingCalls])
   ) as Record<string, number>;
 
+  const recall = await measureRecall(pool);
+  const hnswExplain = await explain(database.pool, captured.hnsw);
+  const exactExplain = await explain(database.pool, captured.exact);
   report = {
     dataset: { entities: ENTITY_COUNT, chunks: CHUNK_COUNT },
     samples: SAMPLE_RUNS,
@@ -290,10 +417,28 @@ try {
     profiles,
     embedding_calls: embeddingCalls,
     database_queries: counts.total,
-    explain: { hybrid: await explain(database.pool, captured.hybrid) }
+    recall,
+    explain: { hnsw: hnswExplain, exact: exactExplain }
   };
 
   if (process.argv.includes('--assert')) {
+    if (!hnswExplain?.indexes.includes('idx_chunks_embedding')) {
+      throw new Error('HNSW search plan did not use idx_chunks_embedding');
+    }
+    if (exactExplain?.indexes.includes('idx_chunks_embedding')) {
+      throw new Error('exact search plan used idx_chunks_embedding');
+    }
+    if (recall.hnsw_strategy !== 'hnsw') {
+      throw new Error(
+        `HNSW recall probe used ${recall.hnsw_strategy ?? 'no strategy'}`
+      );
+    }
+    if (recall.exact_results === 0 || recall.recall < 0.8) {
+      throw new Error(
+        `HNSW recall ${recall.recall.toFixed(2)} fell below 0.80`
+      );
+    }
+
     const maxP95: Record<string, number> = {
       // One provider round trip plus SQL.
       cold_unique_queries: EMBEDDING_CALL_DELAY_MS + 150,

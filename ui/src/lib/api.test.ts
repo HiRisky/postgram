@@ -41,7 +41,7 @@ describe('createApiClient', () => {
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/entities?limit=100&offset=0',
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer test-key' }),
+        headers: { Authorization: 'Bearer test-key' },
       })
     );
   });
@@ -137,10 +137,10 @@ describe('createApiClient', () => {
       '/api/entities/embeddings',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({
+        headers: {
           Authorization: 'Bearer key',
           'Content-Type': 'application/json',
-        }),
+        },
         body: JSON.stringify({ ids: ['id-1', 'id-2', 'id-3'] }),
       })
     );
@@ -166,10 +166,10 @@ describe('createApiClient', () => {
       '/api/entities/bulk/archive',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({
+        headers: {
           Authorization: 'Bearer key',
           'Content-Type': 'application/json',
-        }),
+        },
         body: JSON.stringify({ ids: ['id-1', 'id-2'] }),
       })
     );
@@ -190,7 +190,7 @@ describe('createApiClient', () => {
     expect(mockFetch).toHaveBeenCalledWith(
       '/api/tasks?status=inbox&context=%40home&limit=25&offset=50',
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer key' }),
+        headers: { Authorization: 'Bearer key' },
       })
     );
   });
@@ -220,10 +220,10 @@ describe('createApiClient', () => {
       '/api/tasks/task-1',
       expect.objectContaining({
         method: 'PATCH',
-        headers: expect.objectContaining({
+        headers: {
           Authorization: 'Bearer key',
           'Content-Type': 'application/json',
-        }),
+        },
         body: JSON.stringify({
           version: 2,
           status: 'next',
@@ -254,10 +254,10 @@ describe('createApiClient', () => {
       '/api/tasks/task-1/complete',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({
+        headers: {
           Authorization: 'Bearer key',
           'Content-Type': 'application/json',
-        }),
+        },
         body: JSON.stringify({ version: 3 }),
       })
     );

@@ -95,7 +95,6 @@ export function useGraph() {
   return useMemo(
     () => ({ graph, addEntities, addNeighbours, addEdges, setNodesHiddenByType, setEdgesHiddenByRelation, getLoadedRelations, clear }),
     // graph reference is stable — functions are recreated but graph identity is stable
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     []
   );
 }

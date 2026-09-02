@@ -1,5 +1,5 @@
 import { ResultAsync } from 'neverthrow';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { Logger } from 'pino';
 
 import { requireScope } from '../auth/key-service.js';
@@ -44,6 +44,14 @@ type SearchRow = EntityRow & {
   score: number;
 };
 
+type EmptySearchRow = {
+  [Key in keyof SearchRow]: null;
+};
+
+type SearchEnvelopeRow =
+  | (SearchRow & { result_present: true; candidate_count: number })
+  | (EmptySearchRow & { result_present: false; candidate_count: number });
+
 export type SearchResult = {
   entity: Entity;
   entityId: string;
@@ -82,10 +90,15 @@ type SearchInput = {
   includeArchived?: boolean | undefined;
 };
 
+type SearchStrategyOverride = 'auto' | 'exact' | 'hnsw';
+type HybridSearchStrategy = 'exact' | 'hnsw' | 'hnsw_exact_fallback';
+
 type SearchOptions = {
   embeddingService?: EmbeddingService | undefined;
   now?: (() => Date) | undefined;
   logger?: Pick<Logger, 'debug' | 'warn'> | undefined;
+  strategyOverride?: SearchStrategyOverride | undefined;
+  onStrategy?: ((strategy: HybridSearchStrategy) => void) | undefined;
 };
 
 export type SearchResponse = {
@@ -188,9 +201,89 @@ type SearchContext = {
   now: Date;
 };
 
-// Bound the vector candidate set before SQL-side BM25 and recency reranking.
-// This keeps ranking work and intermediate tuples predictable as the corpus grows.
+// Exact search remains faster for small filtered sets. Above this point the
+// vector distance work dominates and HNSW should choose the candidates.
+const EXACT_SEARCH_MAX_CHUNKS = 5_000;
+const CANDIDATE_MULTIPLIER = 20;
 const CANDIDATE_CAP = 500;
+
+const hnswIterativeScanSupport = new WeakMap<Pool, boolean>();
+
+type HybridEntityAlias = 'e' | 'filtered';
+
+function hybridEntityFilterConditions(alias: HybridEntityAlias): string {
+  return `
+    ($10::boolean = true OR ${alias}.status IS DISTINCT FROM 'archived')
+    AND ($2::text IS NULL OR ${alias}.type = $2)
+    AND ($3::text[] IS NULL OR ${alias}.tags @> $3)
+    AND ($4::text[] IS NULL OR ${alias}.type = ANY($4))
+    AND ${alias}.visibility = ANY($5)
+    AND ($6::text IS NULL OR ${alias}.visibility = $6)
+    AND ${ownerSqlCondition(`${alias}.owner`, '$7')}
+    AND (
+      $11::text IS NULL
+      OR (
+        ${alias}.type = 'memory'
+        AND COALESCE(${alias}.metadata->>'memory_role', 'durable_memory') = $11
+      )
+    )
+    AND ${scopedMemoryVisibilitySql(`${alias}.metadata`, '$12')}
+  `;
+}
+
+const EXACT_CANDIDATES_SQL = `
+  SELECT
+    e.id AS entity_id,
+    c.id AS chunk_id,
+    e.created_at,
+    1 - (c.embedding <=> $1::vector) AS similarity,
+    c.embedding <=> $1::vector AS distance,
+    ts_rank(e.search_tsvector, plainto_tsquery('simple', $8)) AS bm25
+  FROM chunks c
+  JOIN entities e ON e.id = c.entity_id
+  WHERE ${hybridEntityFilterConditions('e')}
+  ORDER BY (c.embedding <=> $1::vector) + 0
+  LIMIT $9
+`;
+
+const HNSW_CANDIDATES_SQL = `
+  SELECT
+    e.id AS entity_id,
+    c.id AS chunk_id,
+    e.created_at,
+    1 - (c.embedding <=> $1::vector) AS similarity,
+    c.embedding <=> $1::vector AS distance,
+    ts_rank(e.search_tsvector, plainto_tsquery('simple', $8)) AS bm25
+  FROM chunks c
+  CROSS JOIN LATERAL (
+    SELECT
+      filtered.id,
+      filtered.created_at,
+      filtered.search_tsvector
+    FROM entities filtered
+    WHERE filtered.id = c.entity_id
+      AND ${hybridEntityFilterConditions('filtered')}
+    -- Prevent PostgreSQL from flattening this into the entity-first plan that
+    -- scans every chunk before sorting by vector distance.
+    OFFSET 0
+  ) e
+  ORDER BY distance
+  LIMIT $9
+`;
+
+type HybridQueryResult = {
+  results: SearchResult[];
+  candidateCount: number;
+  candidateLimit: number;
+};
+type HybridSearchResult = {
+  results: SearchResult[];
+  strategy: HybridSearchStrategy;
+};
+type HybridSearchContext = SearchContext & {
+  queryEmbedding: number[];
+  queryText: string;
+};
 
 function mapSearchRows(rows: SearchRow[]): SearchResult[] {
   return rows.map((row) => {
@@ -205,116 +298,313 @@ function mapSearchRows(rows: SearchRow[]): SearchResult[] {
   });
 }
 
-async function runHybridSearch(
-  pool: Pool,
+function mapSearchEnvelopeRows(rows: SearchEnvelopeRow[]): {
+  results: SearchResult[];
+  candidateCount: number;
+} {
+  const resultRows: SearchRow[] = [];
+  for (const row of rows) {
+    if (row.result_present) {
+      resultRows.push(row);
+    }
+  }
+  return {
+    results: mapSearchRows(resultRows),
+    candidateCount: Number(rows[0]?.candidate_count ?? 0)
+  };
+}
+
+function buildHybridSearchSql(candidateSql: string): string {
+  return `
+    WITH candidates AS MATERIALIZED (
+      ${candidateSql}
+    ),
+    normalized AS (
+      SELECT
+        candidates.*,
+        CASE
+          WHEN MAX(bm25) OVER () = 0 THEN bm25
+          ELSE bm25 / MAX(bm25) OVER ()
+        END AS normalized_bm25
+      FROM candidates
+    ),
+    scored AS (
+      SELECT
+        normalized.*,
+        (
+          ${VECTOR_WEIGHT} * similarity + ${BM25_WEIGHT} * normalized_bm25
+        ) * (
+          1 + $13::double precision * EXP(
+            -EXTRACT(EPOCH FROM ($14::timestamptz - created_at))
+            / 86400.0
+            / ${RECENCY_HALF_LIFE_DAYS}.0
+          )
+        ) AS score
+      FROM normalized
+    ),
+    deduplicated AS (
+      SELECT
+        scored.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY entity_id
+          ORDER BY score DESC, chunk_id
+        ) AS entity_rank
+      FROM scored
+      WHERE score >= $15
+    ),
+    top_results AS MATERIALIZED (
+      SELECT *
+      FROM deduplicated
+      WHERE entity_rank = 1
+      ORDER BY score DESC
+      LIMIT $16
+    ),
+    candidate_stats AS (
+      SELECT COUNT(*)::integer AS candidate_count
+      FROM candidates
+    )
+    SELECT
+      top_results.entity_id IS NOT NULL AS result_present,
+      candidate_stats.candidate_count,
+      e.*,
+      c.content AS chunk_content,
+      top_results.similarity,
+      top_results.score
+    FROM candidate_stats
+    LEFT JOIN top_results ON true
+    LEFT JOIN entities e ON e.id = top_results.entity_id
+    LEFT JOIN chunks c ON c.id = top_results.chunk_id
+    ORDER BY top_results.score DESC NULLS LAST
+  `;
+}
+
+function hybridSearchValues(
   auth: AuthContext,
   input: SearchInput,
-  ctx: SearchContext & { queryEmbedding: number[]; queryText: string }
-): Promise<{ results: SearchResult[] }> {
-  const candidateLimit = Math.min(ctx.limit * 20, CANDIDATE_CAP);
+  ctx: HybridSearchContext,
+  candidateLimit: number
+): unknown[] {
+  return [
+    vectorToSql(ctx.queryEmbedding),
+    input.type ?? null,
+    input.tags?.length ? input.tags : null,
+    auth.allowedTypes,
+    auth.allowedVisibility,
+    input.visibility ?? null,
+    input.owner ?? null,
+    ctx.queryText,
+    candidateLimit,
+    input.includeArchived ?? false,
+    input.memoryRole ?? null,
+    auth.clientId,
+    ctx.recencyWeight,
+    ctx.now,
+    ctx.threshold,
+    ctx.limit
+  ];
+}
 
-  const rows = await pool.query<SearchRow>(
-    `
-      WITH candidates AS MATERIALIZED (
-        SELECT
-          e.id AS entity_id,
-          c.id AS chunk_id,
-          e.created_at,
-          1 - (c.embedding <=> $1::vector) AS similarity,
-          c.embedding <=> $1::vector AS distance,
-          ts_rank(e.search_tsvector, plainto_tsquery('simple', $8)) AS bm25
-        FROM chunks c
-        JOIN entities e ON e.id = c.entity_id
-        WHERE ($10::boolean = true OR e.status IS DISTINCT FROM 'archived')
-          AND ($2::text IS NULL OR e.type = $2)
-          AND ($3::text[] IS NULL OR e.tags @> $3)
-          AND ($4::text[] IS NULL OR e.type = ANY($4))
-          AND e.visibility = ANY($5)
-          AND ($6::text IS NULL OR e.visibility = $6)
-          AND ${ownerSqlCondition('e.owner', '$7')}
-          AND (
-            $11::text IS NULL
-            OR (
-              e.type = 'memory'
-              AND COALESCE(e.metadata->>'memory_role', 'durable_memory') = $11
-            )
-          )
-          AND ${scopedMemoryVisibilitySql('e.metadata', '$12')}
-        ORDER BY distance
-        LIMIT $9
-      ),
-      normalized AS (
-        SELECT
-          candidates.*,
-          CASE
-            WHEN MAX(bm25) OVER () = 0 THEN bm25
-            ELSE bm25 / MAX(bm25) OVER ()
-          END AS normalized_bm25
-        FROM candidates
-      ),
-      scored AS (
-        SELECT
-          normalized.*,
-          (
-            ${VECTOR_WEIGHT} * similarity + ${BM25_WEIGHT} * normalized_bm25
-          ) * (
-            1 + $13::double precision * EXP(
-              -EXTRACT(EPOCH FROM ($14::timestamptz - created_at))
-              / 86400.0
-              / ${RECENCY_HALF_LIFE_DAYS}.0
-            )
-          ) AS score
-        FROM normalized
-      ),
-      deduplicated AS (
-        SELECT
-          scored.*,
-          ROW_NUMBER() OVER (
-            PARTITION BY entity_id
-            ORDER BY score DESC, chunk_id
-          ) AS entity_rank
-        FROM scored
-        WHERE score >= $15
-      ),
-      top_results AS MATERIALIZED (
-        SELECT *
-        FROM deduplicated
-        WHERE entity_rank = 1
-        ORDER BY score DESC
-        LIMIT $16
-      )
-      SELECT
-        e.*,
-        c.content AS chunk_content,
-        top_results.similarity,
-        top_results.score
-      FROM top_results
-      JOIN entities e ON e.id = top_results.entity_id
-      JOIN chunks c ON c.id = top_results.chunk_id
-      ORDER BY top_results.score DESC
-    `,
+async function executeHybridSearch(
+  queryable: Pool | PoolClient,
+  auth: AuthContext,
+  input: SearchInput,
+  ctx: HybridSearchContext,
+  strategy: 'exact' | 'hnsw'
+): Promise<HybridQueryResult> {
+  const candidateLimit = Math.min(
+    ctx.limit * CANDIDATE_MULTIPLIER,
+    CANDIDATE_CAP
+  );
+  const candidateSql =
+    strategy === 'hnsw' ? HNSW_CANDIDATES_SQL : EXACT_CANDIDATES_SQL;
+  const rows = await queryable.query<SearchEnvelopeRow>(
+    buildHybridSearchSql(candidateSql),
+    hybridSearchValues(auth, input, ctx, candidateLimit)
+  );
+  const mapped = mapSearchEnvelopeRows(rows.rows);
+  return { ...mapped, candidateLimit };
+}
+
+function isBroadSearch(auth: AuthContext, input: SearchInput): boolean {
+  const allVisibilities: Visibility[] = ['personal', 'work', 'shared'];
+  return (
+    auth.allowedTypes === null &&
+    allVisibilities.every((visibility) =>
+      auth.allowedVisibility.includes(visibility)
+    ) &&
+    input.type === undefined &&
+    !input.tags?.length &&
+    input.visibility === undefined &&
+    input.owner === undefined &&
+    input.memoryRole === undefined
+  );
+}
+
+async function countFilteredChunks(
+  pool: Pool,
+  auth: AuthContext,
+  input: SearchInput
+): Promise<number> {
+  const rows = await pool.query<{ chunk_count: string }>(
+    `SELECT count(*)::text AS chunk_count
+     FROM (
+       SELECT 1
+       FROM chunks c
+       JOIN entities e ON e.id = c.entity_id
+       WHERE ($1::boolean = true OR e.status IS DISTINCT FROM 'archived')
+         AND ($2::text IS NULL OR e.type = $2)
+         AND ($3::text[] IS NULL OR e.tags @> $3)
+         AND ($4::text[] IS NULL OR e.type = ANY($4))
+         AND e.visibility = ANY($5)
+         AND ($6::text IS NULL OR e.visibility = $6)
+         AND ${ownerSqlCondition('e.owner', '$7')}
+         AND (
+           $8::text IS NULL
+           OR (
+             e.type = 'memory'
+             AND COALESCE(e.metadata->>'memory_role', 'durable_memory') = $8
+           )
+         )
+         AND ${scopedMemoryVisibilitySql('e.metadata', '$9')}
+       LIMIT $10
+     ) matching_chunks`,
     [
-      vectorToSql(ctx.queryEmbedding),
+      input.includeArchived ?? false,
       input.type ?? null,
       input.tags?.length ? input.tags : null,
       auth.allowedTypes,
       auth.allowedVisibility,
       input.visibility ?? null,
       input.owner ?? null,
-      ctx.queryText,
-      candidateLimit,
-      input.includeArchived ?? false,
       input.memoryRole ?? null,
       auth.clientId,
-      ctx.recencyWeight,
-      ctx.now,
-      ctx.threshold,
-      ctx.limit
+      EXACT_SEARCH_MAX_CHUNKS + 1
     ]
   );
+  return Number(rows.rows[0]?.chunk_count ?? '0');
+}
 
+function hasPgErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === code
+  );
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query('ROLLBACK');
+  } catch {
+    // Preserve the original query or configuration error.
+  }
+}
+
+async function executeHnswSearch(
+  pool: Pool,
+  auth: AuthContext,
+  input: SearchInput,
+  ctx: HybridSearchContext
+): Promise<HybridQueryResult | null> {
+  if (hnswIterativeScanSupport.get(pool) === false) {
+    return null;
+  }
+
+  const client = await pool.connect();
+  let transactionActive = false;
+  try {
+    await client.query('BEGIN');
+    transactionActive = true;
+    await client.query("SELECT '[0]'::vector");
+    try {
+      await client.query("SET LOCAL hnsw.iterative_scan = 'strict_order'");
+      hnswIterativeScanSupport.set(pool, true);
+    } catch (error) {
+      if (!hasPgErrorCode(error, '42704')) {
+        throw error;
+      }
+      hnswIterativeScanSupport.set(pool, false);
+      await rollbackQuietly(client);
+      transactionActive = false;
+      return null;
+    }
+
+    const results = await executeHybridSearch(
+      client,
+      auth,
+      input,
+      ctx,
+      'hnsw'
+    );
+    await client.query('COMMIT');
+    transactionActive = false;
+    return results;
+  } catch (error) {
+    if (transactionActive) {
+      await rollbackQuietly(client);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function runHybridSearch(
+  pool: Pool,
+  auth: AuthContext,
+  input: SearchInput,
+  ctx: HybridSearchContext,
+  strategyOverride: SearchStrategyOverride = 'auto'
+): Promise<HybridSearchResult> {
+  if (strategyOverride === 'exact') {
+    const exactResults = await executeHybridSearch(
+      pool,
+      auth,
+      input,
+      ctx,
+      'exact'
+    );
+    return { results: exactResults.results, strategy: 'exact' };
+  }
+
+  const useHnsw =
+    strategyOverride === 'hnsw' ||
+    isBroadSearch(auth, input) ||
+    (await countFilteredChunks(pool, auth, input)) > EXACT_SEARCH_MAX_CHUNKS;
+
+  if (useHnsw) {
+    const hnswResults = await executeHnswSearch(pool, auth, input, ctx);
+    if (
+      hnswResults &&
+      hnswResults.candidateCount >= hnswResults.candidateLimit
+    ) {
+      return { results: hnswResults.results, strategy: 'hnsw' };
+    }
+
+    const exactResults = await executeHybridSearch(
+      pool,
+      auth,
+      input,
+      ctx,
+      'exact'
+    );
+    return {
+      results: exactResults.results,
+      strategy: hnswResults ? 'hnsw_exact_fallback' : 'exact'
+    };
+  }
+
+  const exactResults = await executeHybridSearch(
+    pool,
+    auth,
+    input,
+    ctx,
+    'exact'
+  );
   return {
-    results: mapSearchRows(rows.rows)
+    results: exactResults.results,
+    strategy: 'exact'
   };
 }
 
@@ -404,28 +694,47 @@ export function searchEntities(
       timings['activeModelMs'] = Date.now() - modelStartedAt;
 
       const embeddingStartedAt = Date.now();
-      const queryEmbedding = await embeddingService.embedQuery(
-        query,
-        activeModel,
-        {
-          pool,
-          // Partitions cache entries per client so one client cannot detect
-          // another's queries by timing a hit. An unauthenticated context has
-          // no scope and simply is not cached.
-          ...(auth.clientId ? { cacheScope: auth.clientId } : {}),
-          onCacheStatus: (status) => {
-            cacheStatus = status;
+      let queryEmbedding: number[];
+      try {
+        queryEmbedding = await embeddingService.embedQuery(
+          query,
+          activeModel,
+          {
+            pool,
+            // Partitions cache entries per client so one client cannot detect
+            // another's queries by timing a hit. An unauthenticated context has
+            // no scope and simply is not cached.
+            ...(auth.clientId ? { cacheScope: auth.clientId } : {}),
+            onCacheStatus: (status) => {
+              cacheStatus = status;
+            }
           }
+        );
+      } catch (error) {
+        if (error instanceof AppError) {
+          throw error;
         }
-      );
+
+        throw new AppError(
+          ErrorCode.EMBEDDING_FAILED,
+          error instanceof Error ? error.message : 'Failed to embed query text'
+        );
+      }
       timings['embeddingMs'] = Date.now() - embeddingStartedAt;
 
       const hybridStartedAt = Date.now();
-      const results = await runHybridSearch(pool, auth, input, {
-        ...searchContext,
-        queryEmbedding
-      });
+      const results = await runHybridSearch(
+        pool,
+        auth,
+        input,
+        {
+          ...searchContext,
+          queryEmbedding
+        },
+        options.strategyOverride
+      );
       timings['hybridSqlMs'] = Date.now() - hybridStartedAt;
+      options.onStrategy?.(results.strategy);
 
       const edgeStartedAt = Date.now();
       const resultEntityIds = results.results.map((r) => r.entityId);
@@ -530,6 +839,7 @@ export function searchEntities(
         {
           event: 'search.completed',
           cacheStatus,
+          strategy: results.strategy,
           resultCount: results.results.length,
           timings
         },

@@ -93,12 +93,12 @@ describe('edge-validation-service', () => {
       source: 'llm-extraction'
     }))._unsafeUnwrap();
 
-    const callLlm = async (prompt: string): Promise<string> => {
-      if (prompt.includes('Unrelated project')) {
-        return '{"valid": false, "confidence": 0.1, "reason": "not mentioned"}';
-      }
-      return '{"valid": true, "confidence": 0.95, "reason": "clearly supported"}';
-    };
+    const callLlm = (prompt: string): Promise<string> =>
+      Promise.resolve(
+        prompt.includes('Unrelated project')
+          ? '{"valid": false, "confidence": 0.1, "reason": "not mentioned"}'
+          : '{"valid": true, "confidence": 0.95, "reason": "clearly supported"}'
+      );
 
     const fixedNow = new Date('2026-04-22T10:00:00Z');
     const result = await validateEdgeBatch(database.pool, callLlm, {
@@ -149,9 +149,9 @@ describe('edge-validation-service', () => {
     );
 
     let calls = 0;
-    const callLlm = async (): Promise<string> => {
+    const callLlm = (): Promise<string> => {
       calls += 1;
-      return '{"valid": false, "confidence": 0.0}';
+      return Promise.resolve('{"valid": false, "confidence": 0.0}');
     };
 
     const now = () => new Date('2026-04-22T00:00:00Z');
@@ -211,9 +211,9 @@ describe('edge-validation-service', () => {
     });
 
     let calls = 0;
-    const callLlm = async () => {
+    const callLlm = (): Promise<string> => {
       calls += 1;
-      return '{"valid": true, "confidence": 0.9}';
+      return Promise.resolve('{"valid": true, "confidence": 0.9}');
     };
 
     const result = await validateEdgeBatch(database.pool, callLlm, { limit: 1 });
@@ -243,7 +243,8 @@ describe('edge-validation-service', () => {
       source: 'llm-extraction'
     });
 
-    const callLlm = async (): Promise<string> => '{"valid": false, "confidence": 0.1}';
+    const callLlm = (): Promise<string> =>
+      Promise.resolve('{"valid": false, "confidence": 0.1}');
 
     const result = await validateEdgeBatch(database.pool, callLlm, {
       dryRun: true
