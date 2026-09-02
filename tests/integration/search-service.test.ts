@@ -428,6 +428,80 @@ describe('search-service', () => {
     expect(talonContents).not.toContain('Scoped durable memory for Codex only.');
   }, 120_000);
 
+  it('omits entity and related content when hydration is disabled', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    const auth = makeAuthContext();
+    const largeContent = `compact retrieval marker ${'x'.repeat(100_000)}`;
+    const stored = (
+      await storeEntity(database.pool, auth, {
+        type: 'document',
+        content: largeContent
+      })
+    )._unsafeUnwrap();
+    const neighbor = (
+      await storeEntity(database.pool, auth, {
+        type: 'project',
+        content: `related content ${'y'.repeat(20_000)}`
+      })
+    )._unsafeUnwrap();
+
+    expect(
+      (
+        await createEdge(database.pool, auth, {
+          sourceId: stored.id,
+          targetId: neighbor.id,
+          relation: 'part_of'
+        })
+      ).isOk()
+    ).toBe(true);
+
+    const embeddingService = createEmbeddingService();
+    await createEnrichmentWorker({
+      pool: database.pool,
+      embeddingService
+    }).runOnce();
+
+    const compact = await searchEntities(
+      database.pool,
+      auth,
+      {
+        query: 'compact retrieval marker',
+        threshold: 0,
+        expandGraph: true,
+        includeContent: false
+      },
+      { embeddingService }
+    );
+    const compactHit = compact
+      ._unsafeUnwrap()
+      .results.find((entry) => entry.entity.id === stored.id);
+
+    expect(compactHit?.chunkContent).toEqual(expect.any(String));
+    expect(compactHit?.chunkContent.length).toBeGreaterThan(0);
+    expect(compactHit?.entity.content).toBeNull();
+    expect(compactHit?.related?.[0]?.entity.content).toBeNull();
+
+    const legacy = await searchEntities(
+      database.pool,
+      auth,
+      {
+        query: 'compact retrieval marker',
+        threshold: 0,
+        expandGraph: true
+      },
+      { embeddingService }
+    );
+    const legacyHit = legacy
+      ._unsafeUnwrap()
+      .results.find((entry) => entry.entity.id === stored.id);
+
+    expect(legacyHit?.entity.content).toBe(largeContent);
+    expect(legacyHit?.related?.[0]?.entity.content).toContain('related content');
+  }, 120_000);
+
   it('keeps other clients session context out of graph-expanded search results', async () => {
     if (!database) {
       throw new Error('test database not initialized');

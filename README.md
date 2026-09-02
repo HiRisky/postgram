@@ -849,10 +849,13 @@ export PGM_API_KEY='<plaintext-key>'
 
 ### Search
 
-- `POST /api/search` — hybrid BM25+vector search (supports `expand_graph`)
+- `POST /api/search` — hybrid BM25+vector search (supports `expand_graph` and `include_content`)
 
-REST routes always return full JSON responses. Compact and TOON output are
-transport-layer conveniences for MCP and the CLI only.
+REST search keeps full entity content by default for backwards compatibility.
+Pass `include_content: false` to return matched chunks without hydrating or
+serializing full result and graph-neighbor content. Other REST routes continue
+to return their existing full JSON responses. Compact JSON and TOON remain
+transport-layer conveniences for MCP and the CLI.
 
 ### Tasks
 
@@ -935,17 +938,22 @@ token-heavy outputs default to compact agent-friendly responses:
   writes, `link`) return compact ids/status/version instead of echoing full
   metadata and timestamps
 - `search`, `task_list`, and `expand` return compact rows/graph payloads by
-  default; compact search may include `edges.count` and `edges.relations` as
-  cheap traversal affordances
-- pass `full_response: true` to get the full REST-shaped payload
+  default; compact search contains the matched chunk rather than full result or
+  neighbor content and may include `edges.count` and `edges.relations` as cheap
+  traversal affordances
+- pass `full_response: true` to get the full REST-shaped payload, including
+  complete entity content
 - pass `toon: true` on list-like tools (`search`, `task_list`, `expand`) to
   receive compact TOON text from the MCP layer
 
-Compact `edges` summaries contain counts and relation labels only. They do not
-include neighbor content. Use `expand_graph` or `expand` when the user needs
-causes, provenance, decisions, dependencies, blockers, ownership, involvement,
-discussion participants, connected context, or graph-based disambiguation.
-Avoid expansion for direct facts already present in the compact result.
+Search is the discovery step: inspect compact IDs, scores, and matched chunks,
+then call `recall` only for the selected entities whose complete content is
+needed. Compact `edges` summaries contain counts and relation labels only. They
+do not include neighbor content. Use `expand_graph` or `expand` when the user
+needs causes, provenance, decisions, dependencies, blockers, ownership,
+involvement, discussion participants, connected context, or graph-based
+disambiguation. Avoid expansion for direct facts already present in the matched
+chunk.
 
 The underlying API remains JSON; compacting and TOON happen only in MCP/CLI
 handlers.
@@ -1007,9 +1015,10 @@ pgm store "decided to use pgvector" --type memory --tags decisions
 pgm search "database decisions"
 pgm search "database decisions" --type memory          # filter by entity type
 pgm search "who worked on embeddings" --expand-graph   # include graph neighbours
-pgm search "database decisions" --json                 # compact JSON for agents
-pgm search "database decisions" --json --full-response # full API-shaped JSON
-pgm search "database decisions" --toon                 # compact TOON output
+pgm search "database decisions" --json                 # matched chunks for agents
+pgm search "database decisions" --json --full-response # complete legacy search response
+pgm search "database decisions" --limit 5 --toon       # compact discovery output
+pgm recall <selected-entity-id>                         # complete selected content
 pgm list --json                                        # compact JSON rows
 pgm list --json --full-response                        # full API-shaped rows
 pgm list --toon                                        # compact TOON rows
@@ -1341,7 +1350,9 @@ your global `~/.claude/CLAUDE.md`. A ready-to-use template is provided at
 type filters), how to inspect compact `edges.count`/`edges.relations`, when to
 use `expand_graph`, when to store, when to link, and general principles. Copy
 the relevant sections into your own `CLAUDE.md` and Claude will proactively use
-the MCP tools to persist and recall knowledge without being asked.
+the MCP tools to persist and recall knowledge without being asked. Its default
+retrieval flow is search for compact matched chunks, then recall only the
+selected entities that require complete content.
 
 For coding agents that should avoid broad knowledge-work behavior, use
 [`templates/AGENTS.coding.md`](templates/AGENTS.coding.md) or [`templates/CLAUDE.coding.md`](templates/CLAUDE.coding.md). It narrows Postgram

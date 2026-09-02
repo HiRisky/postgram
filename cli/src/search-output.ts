@@ -3,7 +3,7 @@ export type FullSearchResponse = {
     entity: {
       id: string;
       type: string;
-      content: string | null;
+      content?: string | null;
       tags?: string[];
     };
     chunk_content: string;
@@ -13,7 +13,7 @@ export type FullSearchResponse = {
       entity: {
         id: string;
         type: string;
-        content: string | null;
+        content?: string | null;
       };
       relation: string;
       direction: string;
@@ -110,7 +110,6 @@ export type CompactSearchResult = {
   id: string;
   type: string;
   score: number;
-  content: string | null;
   chunk: string;
   tags?: string[];
   edges?: CompactSearchEdgeSummary;
@@ -127,7 +126,6 @@ type CompactRelatedResult = {
   type: string;
   relation: string;
   direction: string;
-  content: string | null;
 };
 
 export function compactStoredEntity(
@@ -208,7 +206,6 @@ export function compactSearchResponse(
       id: entry.entity.id,
       type: entry.entity.type,
       score: entry.score,
-      content: entry.entity.content,
       chunk: entry.chunk_content,
       ...(entry.entity.tags?.length ? { tags: entry.entity.tags } : {}),
       ...(entry.edges ? { edges: entry.edges } : {}),
@@ -218,8 +215,7 @@ export function compactSearchResponse(
               id: related.entity.id,
               type: related.entity.type,
               relation: related.relation,
-              direction: related.direction,
-              content: related.entity.content
+              direction: related.direction
             }))
           }
         : {})
@@ -266,7 +262,7 @@ function formatEdgeSummary(edges?: CompactSearchEdgeSummary): string {
 
 export function searchResponseToToon(response: CompactSearchResponse): string {
   const lines = [
-    `results[${response.results.length}]{id,type,score,content,chunk,tags,edges,related}:`
+    `results[${response.results.length}]{id,type,score,chunk,tags,edges,related}:`
   ];
 
   for (const result of response.results) {
@@ -277,7 +273,6 @@ export function searchResponseToToon(response: CompactSearchResponse): string {
         Number.isFinite(result.score)
           ? Number(result.score.toFixed(6))
           : result.score,
-        result.content,
         result.chunk,
         result.tags,
         formatEdgeSummary(result.edges),
@@ -289,7 +284,7 @@ export function searchResponseToToon(response: CompactSearchResponse): string {
 
     if (result.related?.length) {
       lines.push(
-        `  related[${result.related.length}]{id,type,relation,direction,content}:`
+        `  related[${result.related.length}]{id,type,relation,direction}:`
       );
       for (const related of result.related) {
         lines.push(
@@ -297,8 +292,7 @@ export function searchResponseToToon(response: CompactSearchResponse): string {
             related.id,
             related.type,
             related.relation,
-            related.direction,
-            related.content
+            related.direction
           ]
             .map(toonScalar)
             .join(',')}`

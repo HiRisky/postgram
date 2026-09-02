@@ -103,6 +103,10 @@ pgm search "what the user asked about" --limit 5 --toon
 
 Hybrid BM25 + vector with recency weighting. Add `--type project` or `--visibility work` to narrow.
 
+Search is a discovery step. Compact JSON and TOON contain matched chunks, not complete entity bodies. Start with a specific query and `--limit 5`, inspect `id`, `score`, `chunk`, tags, and edge summaries, then run `pgm recall <id>` only for the results needed to answer the user.
+
+Do not request `--full-response` just to read a search hit. It can inline large documents and graph-neighbor content. Use it only when a machine consumer needs the complete legacy search envelope. For MCP, use default `search`, then `recall`; set `full_response: true` only for the same exceptional case.
+
 For session continuity, search for recent `session_context` memories first when the user appears to be resuming an active topic.
 
 ```bash
@@ -176,7 +180,8 @@ extraction: pending=8   completed=1230  failed=2
 ## Principles
 
 - **Use TOON for agent-facing reads.** Add `--toon` to `pgm search` and `pgm list` when the model will read and summarize the result. For MCP tools that expose the option, set `toon: true`.
-- **Use JSON for machine parsing.** Add `--json` only when a following shell or tool step needs exact fields, such as extracting IDs with `jq`, or when the full structured response is required.
+- **Search, then recall.** Treat matched chunks as discovery evidence. Recall only the selected IDs whose complete content is needed; do not pull every full document into context.
+- **Use JSON for machine parsing.** Add `--json` only when a following shell or tool step needs exact fields, such as extracting IDs with `jq`. Add `--full-response` only when that consumer needs the complete legacy envelope.
 - **Be specific in content** — Postgram's semantic search works better on concrete sentences than headline-style fragments.
 - **Set visibility deliberately**: `personal` for the user, `work` for shared with colleagues, `shared` for public knowledge. When unsure, ask once and remember the preference.
 - **Don't duplicate** — search first when the user's phrasing suggests something may already exist. Postgram stores everything; a cluttered knowledge base is worse than a sparse one.
@@ -229,14 +234,14 @@ Summarize the top 2–3 hits in natural language. Include the short id so the us
 pgm search "open-brain RFC" --limit 1 --expand-graph --toon
 ```
 
-The `related` field on each result shows graph neighbours — meetings that mentioned it, people involved, decisions caused by it. Summarize the connections, not just the document content.
+The `related` field on each result identifies graph neighbours — meetings that mentioned it, people involved, decisions caused by it. Summarize the connections from their relation and direction; recall a neighbour only when its complete content is needed.
 
 ### User: "link the homelab migration project to Ivo as the owner"
 
 ```bash
 # Find both first
-PROJECT=$(pgm search "homelab migration" --type project --limit 1 --json | jq -r '.results[0].entity.id')
-PERSON=$(pgm search "Ivo" --type person --limit 1 --json | jq -r '.results[0].entity.id')
+PROJECT=$(pgm search "homelab migration" --type project --limit 1 --json | jq -r '.results[0].id')
+PERSON=$(pgm search "Ivo" --type person --limit 1 --json | jq -r '.results[0].id')
 pgm link --source "$PERSON" --target "$PROJECT" --relation assigned_to --confidence 1.0
 ```
 

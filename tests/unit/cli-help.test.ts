@@ -40,7 +40,7 @@ describe('CLI help text', () => {
       'Store durable memory/entity; use memory session-context for resumability'
     );
     expect(normalized).toContain(
-      'Search stored entities (compact JSON with --json; TOON with --toon)'
+      'Search stored entities (chunks by default; full content with --json --full-response)'
     );
     expect(help).toContain('Memory commands for agent session context');
   });

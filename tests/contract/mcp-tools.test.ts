@@ -4,12 +4,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
-import type { AuthContext } from '../../src/auth/types.js';
 import { createKey } from '../../src/auth/key-service.js';
 import { createApp } from '../../src/index.js';
 import { createEmbeddingService } from '../../src/services/embedding-service.js';
 import { createEnrichmentWorker } from '../../src/services/enrichment-worker.js';
-import { storeEntity } from '../../src/services/entity-service.js';
 import {
   createTestDatabase,
   resetTestDatabase,
@@ -797,42 +795,47 @@ describe('MCP tools', () => {
   }, 120_000);
 
   it('does not allow scoped-memory bypass via MCP search arguments', async () => {
-    const { client, clientId, close } = await createClient();
+    const viewer = await createClient();
+    const other = await createClient({
+      clientId: `${viewer.clientId}-other`
+    });
 
     try {
-      const seedAuth: AuthContext = {
-        apiKeyId: '00000000-0000-0000-0000-000000000904',
-        keyName: 'mcp-bypass-seed',
-        clientId,
-        scopes: ['read', 'write', 'delete'],
-        allowedTypes: null,
-        allowedVisibility: ['personal', 'work', 'shared']
-      };
+      const viewerMemory = extractStructuredPayload(
+        (await viewer.client.callTool({
+          name: 'store',
+          arguments: {
+            type: 'memory',
+            visibility: 'personal',
+            content: 'Viewer scoped durable memory for MCP bypass regression.',
+            metadata: {
+              memory_role: 'durable_memory',
+              session_scope: {
+                kind: 'client',
+                client_id: viewer.clientId
+              }
+            }
+          }
+        })) as ToolResultPayload
+      ) as { entity: { id: string } };
 
-      await storeEntity(database!.pool, seedAuth, {
-        type: 'memory',
-        visibility: 'personal',
-        content: 'Viewer scoped durable memory for MCP bypass regression.',
-        metadata: {
-          memory_role: 'durable_memory',
-          session_scope: { kind: 'client', client_id: clientId }
-        }
-      });
-
-      await storeEntity(database!.pool, {
-        ...seedAuth,
-        apiKeyId: '00000000-0000-0000-0000-000000000905',
-        clientId: `${clientId}-other`,
-        keyName: 'mcp-bypass-other'
-      }, {
-        type: 'memory',
-        visibility: 'personal',
-        content: 'Other scoped durable memory for MCP bypass regression.',
-        metadata: {
-          memory_role: 'durable_memory',
-          session_scope: { kind: 'client', client_id: `${clientId}-other` }
-        }
-      });
+      const otherMemory = extractStructuredPayload(
+        (await other.client.callTool({
+          name: 'store',
+          arguments: {
+            type: 'memory',
+            visibility: 'personal',
+            content: 'Other scoped durable memory for MCP bypass regression.',
+            metadata: {
+              memory_role: 'durable_memory',
+              session_scope: {
+                kind: 'client',
+                client_id: other.clientId
+              }
+            }
+          }
+        })) as ToolResultPayload
+      ) as { entity: { id: string } };
 
       await createEnrichmentWorker({
         pool: database!.pool,
@@ -840,7 +843,7 @@ describe('MCP tools', () => {
       }).runOnce();
 
       const searchResult = extractStructuredPayload(
-        (await client.callTool({
+        (await viewer.client.callTool({
           name: 'search',
           arguments: {
             query: 'scoped durable memory MCP bypass regression',
@@ -850,14 +853,18 @@ describe('MCP tools', () => {
           }
         })) as ToolResultPayload
       ) as {
-        results: Array<{ content: string | null }>;
+        results: Array<{ id: string; content?: unknown }>;
       };
 
-      const contents = searchResult.results.map((entry) => entry.content);
-      expect(contents).toContain('Viewer scoped durable memory for MCP bypass regression.');
-      expect(contents).not.toContain('Other scoped durable memory for MCP bypass regression.');
+      const ids = searchResult.results.map((entry) => entry.id);
+      expect(ids).toContain(viewerMemory.entity.id);
+      expect(ids).not.toContain(otherMemory.entity.id);
+      expect(
+        searchResult.results.every((entry) => !('content' in entry))
+      ).toBe(true);
     } finally {
-      await close();
+      await viewer.close();
+      await other.close();
     }
   }, 120_000);
 
@@ -908,7 +915,6 @@ describe('MCP tools', () => {
         results: Array<{
           id: string;
           type: string;
-          content: string | null;
           chunk: string;
           score: number;
         }>;
@@ -921,7 +927,7 @@ describe('MCP tools', () => {
       }
       expect(typeof firstSearchResult.id).toBe('string');
       expect(firstSearchResult.type).toBe('memory');
-      expect(firstSearchResult.content).toContain('postgres notes');
+      expect(firstSearchResult).not.toHaveProperty('content');
       expect(firstSearchResult.chunk).toContain('postgres notes');
       expect(typeof firstSearchResult.score).toBe('number');
       expect(firstSearchResult).not.toHaveProperty('entity');
@@ -1033,7 +1039,11 @@ describe('MCP tools', () => {
         })) as ToolResultPayload
       ) as {
         results: Array<{
-          entity: { id: string; metadata: Record<string, unknown> };
+          entity: {
+            id: string;
+            content: string | null;
+            metadata: Record<string, unknown>;
+          };
           chunk_content: string;
           similarity: number;
         }>;
@@ -1043,6 +1053,9 @@ describe('MCP tools', () => {
         (entry) => entry.entity.id === stored.entity.id
       );
       expect(fullHit?.chunk_content).toContain('compact search');
+      expect(fullHit?.entity.content).toBe(
+        'token compact search response shape'
+      );
       expect(fullHit?.similarity).toEqual(expect.any(Number));
 
       const compact = extractStructuredPayload(
@@ -1060,6 +1073,7 @@ describe('MCP tools', () => {
             count: number;
             relations: Array<{ relation: string; count: number }>;
           };
+          content?: unknown;
           related?: unknown[];
         }>;
       };
@@ -1071,6 +1085,7 @@ describe('MCP tools', () => {
         count: 1,
         relations: [{ relation: 'depends_on', count: 1 }]
       });
+      expect(compactHit).not.toHaveProperty('content');
       expect(compactHit).not.toHaveProperty('related');
 
       const expanded = extractStructuredPayload(
@@ -1086,7 +1101,10 @@ describe('MCP tools', () => {
         results: Array<{
           id: string;
           edges?: unknown;
-          related?: Array<{ relation: string }>;
+          related?: Array<{
+            relation: string;
+            content?: unknown;
+          }>;
         }>;
       };
       expect(expanded.results).toHaveLength(2);
@@ -1100,6 +1118,9 @@ describe('MCP tools', () => {
       expect(expandedHit?.related?.map((entry) => entry.relation)).toContain(
         'depends_on'
       );
+      expect(
+        expandedHit?.related?.every((entry) => !('content' in entry))
+      ).toBe(true);
 
       const toonResult = (await client.callTool({
         name: 'search',
@@ -1113,8 +1134,9 @@ describe('MCP tools', () => {
         toonResult.content?.find((item) => item.type === 'text')?.text ?? '';
       expect(toonResult.structuredContent).toEqual({ toon: toonText });
       expect(toonText).toContain(
-        'results[2]{id,type,score,content,chunk,tags,edges,related}:'
+        'results[2]{id,type,score,chunk,tags,edges,related}:'
       );
+      expect(toonText).not.toContain('{id,type,score,content,chunk');
       expect(toonText).toContain(stored.entity.id);
       expect(toonText).toContain('1 edges: depends_on=1');
       expect(toonText).not.toContain('created_at');

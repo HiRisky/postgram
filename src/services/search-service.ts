@@ -88,6 +88,7 @@ type SearchInput = {
   recencyWeight?: number | undefined;
   expandGraph?: boolean | undefined;
   includeArchived?: boolean | undefined;
+  includeContent?: boolean | undefined;
 };
 
 type SearchStrategyOverride = 'auto' | 'exact' | 'hnsw';
@@ -314,7 +315,14 @@ function mapSearchEnvelopeRows(rows: SearchEnvelopeRow[]): {
   };
 }
 
-function buildHybridSearchSql(candidateSql: string): string {
+function buildHybridSearchSql(
+  candidateSql: string,
+  includeContent: boolean
+): string {
+  const contentProjection = includeContent
+    ? 'e.content'
+    : 'NULL::text AS content';
+
   return `
     WITH candidates AS MATERIALIZED (
       ${candidateSql}
@@ -366,7 +374,19 @@ function buildHybridSearchSql(candidateSql: string): string {
     SELECT
       top_results.entity_id IS NOT NULL AS result_present,
       candidate_stats.candidate_count,
-      e.*,
+      e.id,
+      e.type,
+      ${contentProjection},
+      e.visibility,
+      e.owner,
+      e.status,
+      e.enrichment_status,
+      e.version,
+      e.tags,
+      e.source,
+      e.metadata,
+      e.created_at,
+      e.updated_at,
       c.content AS chunk_content,
       top_results.similarity,
       top_results.score
@@ -418,7 +438,7 @@ async function executeHybridSearch(
   const candidateSql =
     strategy === 'hnsw' ? HNSW_CANDIDATES_SQL : EXACT_CANDIDATES_SQL;
   const rows = await queryable.query<SearchEnvelopeRow>(
-    buildHybridSearchSql(candidateSql),
+    buildHybridSearchSql(candidateSql, input.includeContent ?? true),
     hybridSearchValues(auth, input, ctx, candidateLimit)
   );
   const mapped = mapSearchEnvelopeRows(rows.rows);
@@ -781,10 +801,13 @@ export function searchEntities(
         }
 
         if (allNeighborIds.size > 0) {
+          const neighborContentProjection = input.includeContent ?? true
+            ? 'content'
+            : 'NULL::text AS content';
           const neighbors = await pool.query<{
             id: string; type: string; content: string | null; metadata: Record<string, unknown>;
           }>(
-            `SELECT id, type, content, metadata FROM entities
+            `SELECT id, type, ${neighborContentProjection}, metadata FROM entities
              WHERE id = ANY($1)
                AND status IS DISTINCT FROM 'archived'
                AND ($2::text[] IS NULL OR type = ANY($2))

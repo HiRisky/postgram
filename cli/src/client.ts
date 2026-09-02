@@ -18,9 +18,16 @@ export type StoredEntityResponse = {
   };
 };
 
+type SearchEntityResponse = Omit<
+  StoredEntityResponse['entity'],
+  'content'
+> & {
+  content?: string | null;
+};
+
 export type SearchResponse = {
   results: Array<{
-    entity: StoredEntityResponse['entity'];
+    entity: SearchEntityResponse;
     chunk_content: string;
     similarity: number;
     score: number;
@@ -29,7 +36,12 @@ export type SearchResponse = {
       relations: Array<{ relation: string; count: number }>;
     };
     related?: Array<{
-      entity: { id: string; type: string; content: string | null; metadata: Record<string, unknown> };
+      entity: {
+        id: string;
+        type: string;
+        content?: string | null;
+        metadata: Record<string, unknown>;
+      };
       relation: string;
       direction: 'incoming' | 'outgoing';
     }>;
@@ -205,6 +217,7 @@ export function createPgmClient(options: RestClientOptions) {
       expand_graph?: boolean | undefined;
       include_archived?: boolean | undefined;
       memory_role?: 'durable_memory' | 'session_context' | undefined;
+      include_content?: boolean | undefined;
     }) {
       return request<SearchResponse>(options, '/api/search', {
         method: 'POST',
