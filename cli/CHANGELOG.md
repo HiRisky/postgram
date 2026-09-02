@@ -1,3 +1,9 @@
+## [1.36.1](https://github.com/ivo-toby/postgram/compare/cli-v1.36.0...cli-v1.36.1) (2026-09-02)
+
+### Performance Improvements
+
+* reduce search latency [] ([#105](https://github.com/ivo-toby/postgram/issues/105)) ([813826d](https://github.com/ivo-toby/postgram/commit/813826d0d2e4d301b36cb7293a77c669a8d1aed4))
+
 ## [1.36.0](https://github.com/ivo-toby/postgram/compare/cli-v1.35.1...cli-v1.36.0) (2026-07-26)
 
 ### Features
