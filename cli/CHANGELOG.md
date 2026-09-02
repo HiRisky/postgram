@@ -1,3 +1,9 @@
+## [1.37.0](https://github.com/ivo-toby/postgram/compare/cli-v1.36.1...cli-v1.37.0) (2026-09-02)
+
+### Features
+
+* make search retrieval chunk-first [] ([#106](https://github.com/ivo-toby/postgram/issues/106)) ([8f0a2d1](https://github.com/ivo-toby/postgram/commit/8f0a2d16a8d1dca9384a6ac7342e84a0cd1517ef))
+
 ## [1.36.1](https://github.com/ivo-toby/postgram/compare/cli-v1.36.0...cli-v1.36.1) (2026-09-02)
 
 ### Performance Improvements
