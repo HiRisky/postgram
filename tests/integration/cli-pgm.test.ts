@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -919,6 +920,53 @@ describe('pgm CLI', () => {
     expect(expandBody.edges).toHaveLength(1);
   }, 120_000);
 
+  it('requests chunk-only search unless full response is selected', async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const app = new Hono();
+    app.post('/api/search', async (context) => {
+      requestBodies.push(
+        (await context.req.json()) as Record<string, unknown>
+      );
+      return context.json({ results: [] });
+    });
+
+    let fakeBaseUrl = '';
+    const fakeServer = serve(
+      { fetch: app.fetch, hostname: '127.0.0.1', port: 0 },
+      (info) => {
+        fakeBaseUrl = `http://${info.address}:${info.port}`;
+      }
+    );
+    await vi.waitFor(() => expect(fakeBaseUrl).not.toBe(''));
+
+    try {
+      const env = {
+        PGM_API_URL: fakeBaseUrl,
+        PGM_API_KEY: 'test-key'
+      };
+      await runPgm(['search', 'compact retrieval', '--json'], env);
+      await runPgm(
+        ['search', 'compact retrieval', '--json', '--full-response'],
+        env
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        fakeServer.close((error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+
+    expect(requestBodies.map((body) => body.include_content)).toEqual([
+      false,
+      true
+    ]);
+  }, 120_000);
+
   it('supports full-response, TOON, and discoverable help for search output', async () => {
     if (!database) {
       throw new Error('test database not initialized');
@@ -963,7 +1011,6 @@ describe('pgm CLI', () => {
       results: Array<{
         id: string;
         type: string;
-        content: string | null;
         chunk: string;
         score: number;
       }>;
@@ -975,9 +1022,9 @@ describe('pgm CLI', () => {
     expect(firstCompactResult).toMatchObject({
       id: stored.id,
       type: 'memory',
-      content: 'token compact search response shape',
       chunk: 'token compact search response shape'
     });
+    expect(firstCompactResult).not.toHaveProperty('content');
     expect(typeof firstCompactResult.score).toBe('number');
 
     const fullResult = await runPgm(
@@ -993,12 +1040,19 @@ describe('pgm CLI', () => {
     );
     const full = parseJson(fullResult.stdout) as {
       results: Array<{
-        entity: { id: string; metadata: Record<string, unknown> };
+        entity: {
+          id: string;
+          content: string | null;
+          metadata: Record<string, unknown>;
+        };
         chunk_content: string;
         similarity: number;
       }>;
     };
     expect(full.results[0]?.entity.id).toBe(stored.id);
+    expect(full.results[0]?.entity.content).toBe(
+      'token compact search response shape'
+    );
     expect(full.results[0]?.chunk_content).toContain('compact search');
     expect(full.results[0]?.similarity).toEqual(expect.any(Number));
 
@@ -1007,14 +1061,23 @@ describe('pgm CLI', () => {
       env
     );
     expect(toonResult.stdout).toContain(
-      'results[1]{id,type,score,content,chunk,tags,edges,related}:'
+      'results[1]{id,type,score,chunk,tags,edges,related}:'
     );
     expect(toonResult.stdout).toContain(stored.id);
     expect(toonResult.stdout).not.toContain('created_at');
 
+    const humanResult = await runPgm(
+      ['search', 'compact search', '--threshold', '0'],
+      env
+    );
+    expect(humanResult.stdout).toContain('token compact search response shape');
+    expect(humanResult.stdout).not.toContain('entity:');
+
     const helpResult = await runPgm(['search', '--help'], env);
     expect(helpResult.stdout).toContain('--full-response');
-    expect(helpResult.stdout).toContain('emit the full API response');
+    expect(helpResult.stdout).toMatch(
+      /emit the full API response with complete\s+entity content/u
+    );
     expect(helpResult.stdout).toContain('--toon');
     expect(helpResult.stdout).toContain('emit compact TOON output');
   }, 120_000);

@@ -468,7 +468,9 @@ program
 
 program
   .command('search')
-  .description('Search stored entities (compact JSON with --json; TOON with --toon)')
+  .description(
+    'Search stored entities (chunks by default; full content with --json --full-response)'
+  )
   .argument('query', 'search query')
   .option('--type <type>', 'entity type')
   .option('--tags <tags>', 'comma-separated tags')
@@ -485,7 +487,7 @@ program
   )
   .option(
     '--full-response',
-    'emit the full API response instead of compact default output when used with --json'
+    'emit the full API response with complete entity content when used with --json'
   )
   .option(
     '--toon',
@@ -521,7 +523,8 @@ program
         recency_weight: Number(options.recencyWeight),
         expand_graph: options.expandGraph === true ? true : undefined,
         include_archived: options.includeArchived === true ? true : undefined,
-        memory_role: options.memoryRole
+        memory_role: options.memoryRole,
+        include_content: options.fullResponse === true
       });
 
       if (options.toon === true) {
