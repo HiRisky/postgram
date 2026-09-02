@@ -19,6 +19,17 @@ Invoke this skill proactively when the user:
 - Needs continuity for an active or recent thread — store session context, not durable memory.
 - Relates two things explicitly ("X depends on Y", "A is part of B") — create an edge.
 
+Also store without being asked when any of these happen in the conversation:
+
+- Ivo states a fact about himself, a person, a project, or a tool.
+- Ivo states a preference or a strong opinion.
+- A decision is made and the trade-off is clear.
+- The root cause of a bug is found. Store the cause, not the symptom.
+- A constraint in the environment is found.
+- A piece of work is finished. Store one paragraph: what, why, outcome.
+
+Store it when you are in doubt. Noise costs less than lost context. Never announce that you search or store.
+
 Do **not** invoke this skill for one-off scratchpad content that does not need either session continuity or durable recall. Postgram is not a general notepad.
 
 ## Preflight
@@ -46,7 +57,7 @@ Postgram supports two roles for `memory` entities:
 - `durable_memory`: long-lived facts, decisions, preferences, constraints, root causes, and completed-work summaries.
 - `session_context`: short-lived working context used to resume an active or recent conversation.
 
-Use durable memory for information future agents should treat as stable. Use session context for "where we are in this thread" continuity. Memory entities are embedded for semantic recall by default, but do not participate in graph extraction by default, including durable memory. Operators can opt memory extraction back in with Postgram runtime configuration when they explicitly want graph edges from memory summaries.
+Use durable memory for information future agents should treat as stable. Use session context for "where we are in this thread" continuity. Session context is embedded for semantic recall, but does not participate in graph extraction.
 
 When using MCP and a `store_session_context` tool is available, prefer it for session context. It sets the correct metadata and client scope automatically.
 
@@ -87,95 +98,34 @@ Statuses: `inbox` (unprocessed), `next` (actionable), `waiting` (blocked), `sche
 ### Search
 
 ```bash
-pgm search "what the user asked about" --limit 5
+pgm search "what the user asked about" --limit 5 --toon
 ```
 
 Hybrid BM25 + vector with recency weighting. Add `--type project` or `--visibility work` to narrow.
 
-For agentic use, prefer compact structured search output:
-
-```bash
-pgm search "what the user asked about" --limit 5 --json
-```
-
-`pgm search --json` is compact by default: it returns id, type, score, content,
-matched chunk, tags, cheap edge summaries (`edges.count` and
-`edges.relations`), and compact related entries when expansion is requested,
-while omitting token-heavy metadata, timestamps, nested `entity` objects, and
-raw similarity. Use
-`--full-response` only when you need the full API-shaped payload:
-
-```bash
-pgm search "what the user asked about" --limit 5 --json --full-response
-```
-
-Use TOON when you want the smallest readable CLI search output:
-
-```bash
-pgm search "what the user asked about" --limit 5 --toon
-```
-
-Compacting and TOON are CLI-layer formats. The Postgram REST API always remains
-JSON.
-
-The same compact-output rules apply to other token-heavy CLI surfaces:
-
-- write acknowledgements (`store`, `memory session-context`, `update`, task
-  writes, `link`) return compact ids/status/version by default with `--json`
-- `list`, `task list`, and `expand` return compact rows/graphs by default with
-  `--json`
-- pass `--full-response` when you need metadata, timestamps, source, version
-  details, or other full API fields
-- pass `--toon` on list-like commands (`search`, `list`, `task list`,
-  `expand`) for the smallest readable output
-
-Examples:
-
-```bash
-pgm list --type memory --json
-pgm list --type memory --json --full-response
-pgm list --type memory --toon
-pgm task list --status next --toon
-pgm expand <entity-id> --json
-pgm expand <entity-id> --toon
-```
-
 For session continuity, search for recent `session_context` memories first when the user appears to be resuming an active topic.
 
 ```bash
-pgm search "active topic keywords" --type memory --memory-role session_context --visibility personal --limit 5 --json
+pgm search "active topic keywords" --type memory --memory-role session_context --visibility personal --limit 5 --toon
 ```
 
-Keep the compact default for normal continuity searches. Add `--full-response`
-only when you need to inspect metadata, timestamps, version, source, or raw
-similarity.
-
-For durable knowledge, prefer durable memories and source documents. Treat old session-context hits as working notes, not authoritative facts. Do not expect durable memories to appear as graph neighbours unless an operator has explicitly enabled memory extraction; use ordinary `memory_role=durable_memory` search for durable-memory recall.
+For durable knowledge, prefer durable memories and source documents. Treat old session-context hits as working notes, not authoritative facts.
 
 ### Search with graph expansion
 
 ```bash
-pgm search "what the user asked about" --limit 5 --expand-graph --json
+pgm search "what the user asked about" --limit 5 --expand-graph --toon
 ```
 
-Compact search may show `edges.count` and `edges.relations`. Treat those as
-traversal affordances: they tell you graph context exists without spending
-tokens on neighbor content. Use `--expand-graph` when relationships matter —
-tracing a decision, understanding who worked on something, exploring what's
-connected to a topic. Each expanded result gains a `related` array of
-graph-connected entities with their `relation` and `direction`.
+Use `--expand-graph` whenever relationships matter — tracing a decision, understanding who worked on something, exploring what's connected to a topic. Each result gains a `related` array of graph-connected entities with their `relation` and `direction`.
 
 **When to use expand_graph:**
-
 - "Who was involved in X?" — edges like `involves`, `assigned_to`, `mentioned_in` surface people and meetings
 - "What led to this decision?" — follow `caused_by`, `depends_on`, `part_of` edges
 - "What else is connected to Y?" — open-ended graph neighbourhood traversal
-- Similar search hits need disambiguation through graph context
+- Any time semantic search alone feels too flat
 
-Do not expand when the user only needs a direct fact from the compact result.
-Keep traversal deliberate to control token use.
-
-**Important:** graph edges only exist for source knowledge that has been through extraction (`extraction_status = completed`). Memory entities are embed-only by default, so memory may be searchable without producing graph neighbours. Check `pgm queue` if `related` is empty for a document or interaction — extraction may still be in progress.
+**Important:** graph edges only exist for documents that have been through extraction (`extraction_status = completed`). Check `pgm queue` if `related` is empty — extraction may still be in progress.
 
 ### Recall by id
 
@@ -201,7 +151,7 @@ Common relations: `involves`, `assigned_to`, `part_of`, `blocked_by`, `mentioned
 ### List tasks
 
 ```bash
-pgm list --type task --status next --limit 10
+pgm list --type task --status next --limit 10 --toon
 ```
 
 ### Check enrichment queue
@@ -213,7 +163,6 @@ pgm queue
 ```
 
 Output:
-
 ```
 embedding:  pending=12  completed=3421  failed=0  retry_eligible=0  oldest_pending=4s
 extraction: pending=8   completed=1230  failed=2
@@ -224,88 +173,16 @@ extraction: pending=8   completed=1230  failed=2
 - `retry_eligible` — failed embedding jobs that will be retried automatically
 - `extraction: null / disabled` — extraction is off; enable with `EXTRACTION_ENABLED=true`
 
-### Groom stale session context
-
-Use this only for stale working context that belongs to the authenticated
-client. Self-grooming can preview or archive; promotion to durable memory is an
-admin/operator workflow.
-
-CLI dry-run:
-
-```bash
-pgm memory groom --dry-run --older-than 7d
-```
-
-CLI archive, with optional filters:
-
-```bash
-pgm memory groom --older-than 14d --topic postgram --tag session-context --yes
-```
-
-MCP self-grooming uses `groom_session_context`:
-
-```json
-{
-  "mode": "dry_run",
-  "older_than": "7d",
-  "topic": "postgram",
-  "tags": ["session-context"]
-}
-```
-
-Grooming has no default candidate cap. Pass `--limit <n>` or `limit` only when
-you intentionally want a bounded batch.
-
-Do not pass or invent a client id for self-grooming. Postgram derives scope
-from the API key. Use `pgm-admin memory groom --client-id <id>` or
-`--all-clients` only as an operator, and use admin `--mode promote --yes` for
-LLM-assisted promotion.
-
-### Groom durable memory quality
-
-Use this only as an operator/admin workflow. Durable grooming reviews active
-`durable_memory` rows, including legacy memories with no explicit
-`memory_role`, and marks whether they should be kept, groomed later, archived,
-or treated as superseded. It does not rewrite content or archive rows.
-
-```bash
-pgm-admin memory groom-durable --dry-run --older-than 30d
-pgm-admin memory groom-durable --mode mark --yes --older-than 30d
-```
-
-Mark mode writes `metadata.durable_grooming` with a status, reason,
-`reviewed_at`, and optional LLM suggestions. Treat `needs_grooming`, `archive`,
-and `superseded` as review labels until an operator explicitly applies them.
-
-To clean marked durable memory, use:
-
-```bash
-pgm-admin memory apply-durable-grooming --dry-run
-pgm-admin memory apply-durable-grooming --yes
-```
-
-Apply mode defaults to `auto`: `needs_grooming` rows are rewritten from stored
-suggestions or the configured extraction LLM, and `archive`/`superseded` rows
-are archived. It records `applied_at` metadata; rewritten rows are marked
-`keep`, stale chunks are deleted, and embedding enrichment is queued again. Use
-`--mode rewrite`, `--mode archive`, `--status`, `--topic`, `--tag`,
-`--visibility`, or `--limit` to narrow the batch.
-
 ## Principles
 
-- **Prefer JSON output** (`--json`) when parsing results into further actions. Human table output is for direct display.
-- **Keep output compact by default** — `pgm ... --json` on token-heavy commands
-  is designed for agent token efficiency. Reach for `--full-response` only when
-  the omitted fields are required, or `--toon` when a small readable listing is
-  enough.
+- **Use TOON for agent-facing reads.** Add `--toon` to `pgm search` and `pgm list` when the model will read and summarize the result. For MCP tools that expose the option, set `toon: true`.
+- **Use JSON for machine parsing.** Add `--json` only when a following shell or tool step needs exact fields, such as extracting IDs with `jq`, or when the full structured response is required.
 - **Be specific in content** — Postgram's semantic search works better on concrete sentences than headline-style fragments.
 - **Set visibility deliberately**: `personal` for the user, `work` for shared with colleagues, `shared` for public knowledge. When unsure, ask once and remember the preference.
 - **Don't duplicate** — search first when the user's phrasing suggests something may already exist. Postgram stores everything; a cluttered knowledge base is worse than a sparse one.
-- **When storing from a long exchange**, store a _summary_ memory with the key facts, not the full transcript. The transcript belongs in the conversation log; the memory is the distilled signal.
+- **When storing from a long exchange**, store a *summary* memory with the key facts, not the full transcript. The transcript belongs in the conversation log; the memory is the distilled signal.
 - **Separate continuity from knowledge** — use `session_context` for active-thread state and `durable_memory` for stable facts. Do not make session context durable by copying it verbatim.
-- **Use memory as recall, not graph source, by default** — both durable and session-context memories are embedded for semantic search but skipped by graph extraction unless an operator explicitly enables memory extraction.
 - **Let Postgram groom** — promotion from session context to durable memory should be handled by Postgram's groomer or an explicit operator workflow, because promotion changes the authority and sharing level of the memory. The groomer uses the configured extraction LLM to assess whether eligible session context deserves promotion and stores only the distilled durable memory, not a verbatim copy.
-- **Treat durable grooming marks as labels until applied** — `durable_grooming` metadata flags follow-up work. Only `pgm-admin memory apply-durable-grooming --yes` turns those labels into rewrites or archives.
 
 ## Failure modes to recognize
 
@@ -341,7 +218,7 @@ pgm memory session-context --visibility personal \
 ### User: "what did I say about embeddings last week"
 
 ```bash
-pgm search "embeddings" --visibility personal --limit 5 --json
+pgm search "embeddings" --visibility personal --limit 5 --toon
 ```
 
 Summarize the top 2–3 hits in natural language. Include the short id so the user can drill in if they want.
@@ -349,7 +226,7 @@ Summarize the top 2–3 hits in natural language. Include the short id so the us
 ### User: "what else is connected to the open-brain RFC?"
 
 ```bash
-pgm search "open-brain RFC" --limit 1 --expand-graph --json
+pgm search "open-brain RFC" --limit 1 --expand-graph --toon
 ```
 
 The `related` field on each result shows graph neighbours — meetings that mentioned it, people involved, decisions caused by it. Summarize the connections, not just the document content.
@@ -365,10 +242,10 @@ pgm link --source "$PERSON" --target "$PROJECT" --relation assigned_to --confide
 
 ### User: "end of day — what did we get done?"
 
-Recent completed tasks:
+Completed tasks:
 
 ```bash
-pgm list --type task --status done --since 1d --json
+pgm list --type task --status done --limit 50 --toon
 ```
 
 Then store a wrap-up memory:
@@ -381,8 +258,7 @@ pgm store --type memory --visibility personal \
 
 ## Non-goals
 
-- Don't use Postgram as a replacement for a file system — it stores _text entities_, not code or artifacts.
+- Don't use Postgram as a replacement for a file system — it stores *text entities*, not code or artifacts.
 - Don't store secrets (API keys, tokens, credentials) — audit log records every write.
 - Don't use it for volatile state (counters, session tokens, caches).
 - Don't treat session-context memory as durable truth. It is working context until groomed or promoted by Postgram's LLM-assisted groomer.
-- Don't assume memory entities create graph edges. By default they are semantic-recall records only; graph extraction is for source knowledge unless explicitly configured otherwise.
