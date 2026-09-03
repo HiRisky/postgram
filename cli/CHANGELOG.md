@@ -1,3 +1,9 @@
+## [1.37.1](https://github.com/ivo-toby/postgram/compare/cli-v1.37.0...cli-v1.37.1) (2026-09-03)
+
+### Bug Fixes
+
+* **skill:** remove personal identifiers ([7924b77](https://github.com/ivo-toby/postgram/commit/7924b77e992c3f444cc40c784250a4ba3cb3f6c4))
+
 ## [1.37.0](https://github.com/ivo-toby/postgram/compare/cli-v1.36.1...cli-v1.37.0) (2026-09-02)
 
 ### Features
