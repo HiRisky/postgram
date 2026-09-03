@@ -206,8 +206,8 @@ future turn resume the active thread. Examples:
 
 Agents should store durable memory more selectively. Examples:
 
-- "Ivo prefers Postgram to support both session continuity and durable memory
-  through a lightweight metadata role."
+- "The user prefers Postgram to support both session continuity and durable
+  memory through a lightweight metadata role."
 - "Decision: graph extraction should not run on session-context memories."
 
 The API does not need separate endpoints. Existing `store` and `update` calls

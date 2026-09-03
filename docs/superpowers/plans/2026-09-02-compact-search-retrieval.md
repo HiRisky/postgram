@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript 5.9, Node.js 22, PostgreSQL 16 with pgvector, Hono REST, MCP SDK, Commander CLI, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-06-27-search-edge-affordances-design.md`, with the result-content disclosure amendment recorded under Global Constraints below and approved by Ivo on 2026-09-02.
+**Spec:** `docs/superpowers/specs/2026-06-27-search-edge-affordances-design.md`, with the approved result-content disclosure amendment recorded under Global Constraints below.
 
 ## Global Constraints
 
@@ -763,7 +763,7 @@ Expected:
 - compact `has_content` is false;
 - full `has_content` is true;
 - compact bytes are bounded by matched chunks and metadata, not the 265,532 characters of entity bodies observed on 2026-09-02;
-- no request is sent to `postgram.cloud.toby.nu` during this deployment check;
+- no request is sent to any production endpoint during this deployment check;
 - document bodies are consumed by `jq` and never printed or saved.
 
 - [ ] **Step 6: Commit documentation**

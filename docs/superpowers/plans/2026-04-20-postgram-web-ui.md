@@ -3117,7 +3117,8 @@ server {
 - [ ] **Step 3: Read `docker-compose.yml` at repo root**
 
 ```bash
-cat /home/ivo/workspace/postgram/docker-compose.yml
+POSTGRAM_ROOT=$(git rev-parse --show-toplevel)
+cat "$POSTGRAM_ROOT/docker-compose.yml"
 ```
 
 - [ ] **Step 4: Add postgram-ui service to `docker-compose.yml`**
@@ -3139,7 +3140,7 @@ Add to the `services:` section:
 - [ ] **Step 5: Build Docker image to verify it compiles**
 
 ```bash
-cd /home/ivo/workspace/postgram && docker build -t postgram-ui-test ./ui
+cd "$(git rev-parse --show-toplevel)" && docker build -t postgram-ui-test ./ui
 ```
 
 Expected: Build succeeds, `COPY --from=builder /app/dist` step succeeds.

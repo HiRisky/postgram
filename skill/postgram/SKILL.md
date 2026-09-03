@@ -21,8 +21,8 @@ Invoke this skill proactively when the user:
 
 Also store without being asked when any of these happen in the conversation:
 
-- Ivo states a fact about himself, a person, a project, or a tool.
-- Ivo states a preference or a strong opinion.
+- The user states a fact about themselves, a person, a project, or a tool.
+- The user states a preference or a strong opinion.
 - A decision is made and the trade-off is clear.
 - The root cause of a bug is found. Store the cause, not the symptom.
 - A constraint in the environment is found.
@@ -236,12 +236,12 @@ pgm search "open-brain RFC" --limit 1 --expand-graph --toon
 
 The `related` field on each result identifies graph neighbours — meetings that mentioned it, people involved, decisions caused by it. Summarize the connections from their relation and direction; recall a neighbour only when its complete content is needed.
 
-### User: "link the homelab migration project to Ivo as the owner"
+### User: "link the homelab migration project to its owner"
 
 ```bash
 # Find both first
 PROJECT=$(pgm search "homelab migration" --type project --limit 1 --json | jq -r '.results[0].id')
-PERSON=$(pgm search "Ivo" --type person --limit 1 --json | jq -r '.results[0].id')
+PERSON=$(pgm search "homelab migration owner" --type person --limit 1 --json | jq -r '.results[0].id')
 pgm link --source "$PERSON" --target "$PROJECT" --relation assigned_to --confidence 1.0
 ```
 

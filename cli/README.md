@@ -109,7 +109,7 @@ expand when the compact result already answers a direct fact.
 Store durable memory:
 
 ```bash
-pgm store "Ivo prefers client-scoped session context in Postgram." \
+pgm store "The user prefers client-scoped session context in Postgram." \
   --type memory \
   --visibility personal \
   --metadata '{"memory_role":"durable_memory"}'
