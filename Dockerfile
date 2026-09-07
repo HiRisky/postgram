@@ -6,6 +6,7 @@ RUN npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
+RUN npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
 FROM node:22-alpine
 LABEL io.modelcontextprotocol.server.name="io.github.ivo-toby/postgram"
