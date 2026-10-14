@@ -27,7 +27,12 @@ const activeTestModel = {
   createdAt: '2026-06-01T00:00:00.000Z'
 };
 
-function searchRow(id: string, content: string, score = 0.88) {
+function searchRow(
+  id: string,
+  content: string,
+  score = 0.88,
+  candidateCount = 500
+) {
   const createdAt = new Date('2026-06-01T00:00:00.000Z');
   return {
     id,
@@ -47,7 +52,7 @@ function searchRow(id: string, content: string, score = 0.88) {
     similarity: 1,
     score,
     result_present: true,
-    candidate_count: 500
+    candidate_count: candidateCount
   };
 }
 
@@ -82,7 +87,11 @@ describe('buildSearchEdgeSummaries', () => {
 
 describe('searchEntities query embedding', () => {
   function makePool(
-    options: { chunkCount?: string; iterativeScanSupported?: boolean } = {}
+    options: {
+      chunkCount?: string;
+      iterativeScanSupported?: boolean;
+      candidateCount?: number;
+    } = {}
   ) {
     const chunkCount = options.chunkCount ?? '42';
     const iterativeScanSupported = options.iterativeScanSupported ?? true;
@@ -115,7 +124,9 @@ describe('searchEntities query embedding', () => {
           rows: [
             searchRow(
               '00000000-0000-0000-0000-000000000011',
-              'hybrid result'
+              'hybrid result',
+              0.88,
+              options.candidateCount
             )
           ]
         });
@@ -150,7 +161,7 @@ describe('searchEntities query embedding', () => {
     };
   }
 
-  it('runs only the hybrid query — no speculative lexical query', async () => {
+  it('builds keyword candidates in one combined hybrid query', async () => {
     const { pool, queries } = makePool();
     const embedQuery = vi.fn().mockResolvedValue([1, 0, 0]);
 
@@ -165,8 +176,31 @@ describe('searchEntities query embedding', () => {
     expect(result._unsafeUnwrap()).toMatchObject({
       results: [{ chunkContent: 'hybrid result' }]
     });
-    expect(queries.some((sql) => sql.includes('search_tsvector @@'))).toBe(
-      false
+    expect(
+      queries.filter((sql) => sql.includes('ROW_NUMBER() OVER'))
+    ).toHaveLength(1);
+  });
+
+  it('passes the complete long query to embedding instead of the capped keyword terms', async () => {
+    const { pool } = makePool();
+    const query = Array.from(
+      { length: 300 },
+      (_, index) => `pasted-term-${index}`
+    ).join(' ');
+    const embedQuery = vi.fn().mockResolvedValue([1, 0, 0]);
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query, threshold: 0 },
+      { embeddingService: makeEmbeddingService(embedQuery) }
+    );
+
+    expect(result.isOk()).toBe(true);
+    expect(embedQuery).toHaveBeenCalledWith(
+      query,
+      activeTestModel,
+      expect.any(Object)
     );
   });
 
@@ -250,6 +284,32 @@ describe('searchEntities query embedding', () => {
     );
     expect(hybridQueries).toHaveLength(1);
     expect(hybridQueries[0]).toContain('CROSS JOIN LATERAL');
+  });
+
+  it('uses vector candidate count for fallback even when keyword candidates exist', async () => {
+    const { pool, queries } = makePool({
+      chunkCount: '5001',
+      candidateCount: 1
+    });
+
+    const result = await searchEntities(
+      pool,
+      searchAuth,
+      { query: 'postgres search', threshold: 0, limit: 1 },
+      {
+        embeddingService: makeEmbeddingService(
+          vi.fn().mockResolvedValue([1, 0, 0])
+        )
+      }
+    );
+
+    expect(result.isOk()).toBe(true);
+    const hybridQueries = queries.filter((sql) =>
+      sql.includes('ROW_NUMBER() OVER')
+    );
+    expect(hybridQueries).toHaveLength(2);
+    expect(hybridQueries[0]).toContain('CROSS JOIN LATERAL');
+    expect(hybridQueries[1]).not.toContain('CROSS JOIN LATERAL');
   });
 
   it('uses HNSW for filtered candidate sets above the exact-search threshold', async () => {
