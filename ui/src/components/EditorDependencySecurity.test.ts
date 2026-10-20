@@ -12,7 +12,7 @@ import * as viewModule from '@tiptap/pm/view';
 describe('editor dependency security', () => {
   it('does not inherit DOM attributes from an own __proto__ property', () => {
     // GHSA-cp6q-959q-f8rh: use inert canaries, never executable payloads.
-    const input = JSON.parse('{"__proto__":{"data-inherited-canary":"unexpected"}}');
+    const input = JSON.parse('{"__proto__":{"data-inherited-canary":"unexpected"}}') as Record<string, unknown>;
     const attributes = mergeAttributes({ class: 'safe' }, input);
     expect(attributes.class).toBe('safe');
     expect('data-inherited-canary' in attributes).toBe(false);
