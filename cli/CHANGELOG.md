@@ -1,3 +1,26 @@
+## [1.37.3](https://github.com/ivo-toby/postgram/compare/cli-v1.37.2...cli-v1.37.3) (2026-10-14)
+
+### Bug Fixes
+
+* retrieve keyword candidates with chunk rank fusion [[#114](https://github.com/ivo-toby/postgram/issues/114)] ([#116](https://github.com/ivo-toby/postgram/issues/116)) ([f027e8a](https://github.com/ivo-toby/postgram/commit/f027e8ad3da2db8d084b41b5dafed7d3a84d76b9))
+
+## [Unreleased]
+
+### Changed
+
+* **search:** Scores now use relative RRF values, typically about `0.008`–`0.033`,
+  and can shift when vector or keyword branch membership and ranks change.
+  `--threshold` is a cosine similarity floor rather than a fused-score
+  threshold; below-floor keyword matches require at least half of the retained
+  distinct query terms, rounded up. Existing stored thresholds may return looser
+  results, so retune clients during migration.
+
+## [1.37.2](https://github.com/ivo-toby/postgram/compare/cli-v1.37.1...cli-v1.37.2) (2026-10-08)
+
+### Bug Fixes
+
+* **chunking:** never split surrogate pairs or emit lone surrogates ([#110](https://github.com/ivo-toby/postgram/issues/110)) ([a81d4aa](https://github.com/ivo-toby/postgram/commit/a81d4aaf5dd9d953799820b7d3a928c38144cead))
+
 ## [1.37.1](https://github.com/ivo-toby/postgram/compare/cli-v1.37.0...cli-v1.37.1) (2026-09-03)
 
 ### Bug Fixes

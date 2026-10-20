@@ -151,6 +151,67 @@ describe('Talon migration', () => {
     }
   });
 
+  it('installs the transactional chunk content GIN index', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    const index = await database.pool.query<{ indexdef: string }>(
+      `SELECT indexdef
+       FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND tablename = 'chunks'
+         AND indexname = 'idx_chunks_content_tsvector'`
+    );
+
+    expect(index.rows).toHaveLength(1);
+    expect(index.rows[0]?.indexdef).toContain(
+      "USING gin (to_tsvector('simple'::regconfig, content))"
+    );
+
+    const migration = await database.pool.query<{ version: string }>(
+      `SELECT version
+       FROM schema_migrations
+       WHERE version = '017_chunk_keyword_index.sql'`
+    );
+    expect(migration.rows).toEqual([
+      { version: '017_chunk_keyword_index.sql' }
+    ]);
+  }, 120_000);
+
+  it('keeps chunk embeddings non-null for vector search', async () => {
+    if (!database) {
+      throw new Error('test database not initialized');
+    }
+
+    await resetTestDatabase(database.pool);
+    const entityId = crypto.randomUUID();
+    await database.pool.query(
+      `INSERT INTO entities (
+         id, type, content, visibility, status, enrichment_status
+       )
+       VALUES ($1, 'memory', 'embedding constraint fixture', 'shared', 'active', 'completed')`,
+      [entityId]
+    );
+    const model = await database.pool.query<{ id: string }>(
+      'SELECT id FROM embedding_models WHERE is_active = true'
+    );
+    const modelId = model.rows[0]?.id;
+    if (!modelId) {
+      throw new Error('active embedding model not initialized');
+    }
+
+    await expect(
+      database.pool.query(
+        `INSERT INTO chunks (
+           entity_id, chunk_index, content, embedding, model_id, token_count
+         )
+         VALUES ($1, 0, 'null embedding', NULL, $2, 2)`,
+        [entityId, modelId]
+      )
+    ).rejects.toMatchObject({ code: '23502' });
+  }, 120_000);
+
   it('dry-runs without writing and reports the items that would migrate', async () => {
     if (!database) {
       throw new Error('test database not initialized');

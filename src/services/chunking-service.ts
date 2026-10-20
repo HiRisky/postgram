@@ -14,6 +14,37 @@ const DEFAULT_CHUNK_SIZE = 300;
 const DEFAULT_OVERLAP = 100;
 const DEFAULT_SEPARATORS = ['\n\n', '\n', '. ', ' '];
 
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Replaces unpaired UTF-16 surrogates with U+FFFD. JSON.stringify serialises a
+ * lone surrogate as a `\ud83d` escape, which strict API servers (Mistral, for
+ * one) reject with a 400, failing every chunk that carries one.
+ */
+function replaceLoneSurrogates(text: string): string {
+  return text.replace(LONE_SURROGATE, '\uFFFD');
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
+ * Chunk boundaries are UTF-16 indexes, so a boundary can land between the two
+ * halves of a pair (an emoji, say). Step back so the pair stays whole.
+ */
+function alignToCodePoint(text: string, index: number): number {
+  if (
+    index > 0
+    && index < text.length
+    && isHighSurrogate(text.charCodeAt(index - 1))
+  ) {
+    return index - 1;
+  }
+  return index;
+}
+
 export function estimateTokenCount(text: string): number {
   const tokens = text.trim().split(/\s+/).filter(Boolean);
   return Math.max(tokens.length, 1);
@@ -39,7 +70,7 @@ export function chunkText(
   text: string,
   options: ChunkTextOptions = {}
 ): ChunkDraft[] {
-  const normalized = text.trim();
+  const normalized = replaceLoneSurrogates(text).trim();
   if (!normalized) {
     return [];
   }
@@ -54,10 +85,18 @@ export function chunkText(
 
   while (start < normalized.length) {
     const rawEnd = Math.min(start + chunkSize, normalized.length);
-    const end =
+    let end =
       rawEnd === normalized.length
         ? rawEnd
-        : findSplitPoint(normalized, start, rawEnd, separators);
+        : alignToCodePoint(
+            normalized,
+            findSplitPoint(normalized, start, rawEnd, separators)
+          );
+    if (end <= start) {
+      // chunkSize smaller than one code point: take the whole pair rather than
+      // making no progress.
+      end = Math.min(start + 2, normalized.length);
+    }
     const content = normalized.slice(start, end).trim();
 
     if (content) {
@@ -73,7 +112,7 @@ export function chunkText(
       break;
     }
 
-    const nextStart = Math.max(0, end - overlap);
+    const nextStart = alignToCodePoint(normalized, Math.max(0, end - overlap));
     start = nextStart > start ? nextStart : end;
   }
 
